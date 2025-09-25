@@ -1,0 +1,6 @@
+<div class="app-container">
+  <app-loading-screen *ngIf="isLoading"></app-loading-screen>
+  <div class="main-app" [class.fade-in]="!isLoading" *ngIf="!isLoading">
+    <app-chat-interface></app-chat-interface>
+  </div>
+</div>

@@ -1,0 +1,14 @@
+fastapi==0.104.1
+uvicorn==0.24.0
+llama-index==0.10.68
+llama-index-llms-ollama==0.1.5
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.23
+pandas==2.1.4
+python-dotenv==1.0.0
+pydantic==2.8.0
+transformers==4.21.0
+torch==2.1.1
+sqlparse==0.4.4
+sentence-transformers==2.2.2
+sentencepiece==0.1.99

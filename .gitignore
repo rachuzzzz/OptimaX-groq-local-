@@ -1,0 +1,29 @@
+# Dependencies
+sql-chat-app/node_modules/
+sql-chat-backend/venv/
+sql-chat-backend/__pycache__/
+
+# Build outputs
+sql-chat-app/dist/
+sql-chat-app/.angular/
+
+# Environment variables
+sql-chat-backend/.env
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Model cache
+sql-chat-backend/models/
+sql-chat-backend/.cache/

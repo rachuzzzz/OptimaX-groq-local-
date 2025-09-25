@@ -1,0 +1,461 @@
+<div class="app-wrapper">
+<div class="chat-container">
+  <!-- Left Sidebar -->
+  <div class="sidebar" [class.collapsed]="!sidebarExpanded">
+    <!-- OptimaX Logo -->
+    <div class="sidebar-logo">
+      <div class="logo" *ngIf="sidebarExpanded">
+        <h1>OptimaX</h1>
+      </div>
+      <div class="logo-collapsed" *ngIf="!sidebarExpanded">
+        <span>OX</span>
+      </div>
+    </div>
+
+    <!-- Sidebar Toggle Button -->
+    <div class="sidebar-toggle" (click)="toggleSidebar()">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M3 12h18m-9-9l9 9-9 9" *ngIf="!sidebarExpanded"/>
+        <path d="M21 12H3m9-9l-9 9 9 9" *ngIf="sidebarExpanded"/>
+      </svg>
+    </div>
+
+    <!-- Collapsed State - Icon Buttons -->
+    <div class="sidebar-icons" *ngIf="!sidebarExpanded">
+      <div class="icon-button" title="Navigation">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+          <polyline points="9,22 9,12 15,12 15,22"/>
+        </svg>
+      </div>
+      <div class="icon-button" title="Tools">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+        </svg>
+      </div>
+      <div class="icon-button" title="History">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/>
+          <polyline points="12,6 12,12 16,14"/>
+        </svg>
+      </div>
+      <div class="icon-button" title="Settings">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M12 1v6m0 6v6m11-7h-6m-6 0H1"/>
+        </svg>
+      </div>
+    </div>
+
+    <!-- Expanded State - Full Content -->
+    <div class="sidebar-content" *ngIf="sidebarExpanded">
+      <div class="sidebar-section">
+        <h3>System Prompt</h3>
+        <div class="sidebar-item">
+          <button class="system-prompt-toggle" (click)="openSystemPromptModal()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 20h9"/>
+              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+            </svg>
+            <span>Edit System Prompt</span>
+          </button>
+          <div class="prompt-status-indicator">
+            <span class="status-text" [class.custom]="isUsingCustomPrompt">
+              {{ isUsingCustomPrompt ? 'Custom Prompt Active' : 'Default Prompt' }}
+            </span>
+          </div>
+        </div>
+      </div>
+      <div class="sidebar-section">
+        <h3>Database</h3>
+        <div class="sidebar-item" (click)="showTableInfo()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0H5a2 2 0 0 1-2-2v-4m6 6h10a2 2 0 0 1 2-2v-4"/>
+          </svg>
+          <span>Table Schema</span>
+        </div>
+        <div class="sidebar-item" (click)="showConnectionStatus()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 11.034C18.817 8.797 20.731 7 23 7c3.314 0 6 2.686 6 6s-2.686 6-6 6c-2.269 0-4.183-1.797-5-4.034"/>
+            <path d="M6 11.034C5.183 8.797 3.269 7 1 7C-2.314 7-5 9.686-5 13s2.686 6 6 6c2.269 0 4.183-1.797 5-4.034"/>
+          </svg>
+          <span>Connection</span>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <h3>Developer Tools</h3>
+        <div class="sidebar-item" (click)="toggleDebugMode()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="m8 2 1.88 1.88"/>
+            <path d="M14.12 3.88 16 2"/>
+            <path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/>
+            <path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/>
+            <path d="M12 20v-9"/>
+            <path d="M6.53 9C4.6 8.8 3 7.1 3 5"/>
+            <path d="M6 13H2"/>
+            <path d="M3 21c0-2.1 1.7-3.9 3.8-4"/>
+            <path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/>
+            <path d="M22 13h-4"/>
+            <path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/>
+          </svg>
+          <span>Debug Mode</span>
+          <span class="debug-indicator" [class.active]="debugMode"></span>
+        </div>
+        <div class="sidebar-item" (click)="exportHistory()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7,10 12,15 17,10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          <span>Export Chat</span>
+        </div>
+        <div class="sidebar-item" (click)="showQueryAnalytics()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="20" x2="18" y2="10"/>
+            <line x1="12" y1="20" x2="12" y2="4"/>
+            <line x1="6" y1="20" x2="6" y2="14"/>
+          </svg>
+          <span>Query Analytics</span>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <h3>Recent Queries</h3>
+        <div class="sidebar-item" *ngFor="let query of recentQueries.slice(0, 3); let i = index"
+             (click)="useRecentQuery(query)"
+             [title]="query">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <polyline points="12,6 12,12 16,14"/>
+          </svg>
+          <span class="truncated-query">{{ query.length > 25 ? query.substring(0, 25) + '...' : query }}</span>
+        </div>
+        <div class="sidebar-item" *ngIf="recentQueries.length === 0">
+          <span class="empty-state">No recent queries</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Content Area -->
+  <div class="main-content">
+    <!-- Developer Control Panel -->
+  <div class="developer-control-panel">
+    <div class="panel-header">
+      <div class="header-left">
+        <h2>Developer Console</h2>
+        <div class="connection-status">
+          <div class="status-dot" [class.connected]="backendConnected"></div>
+          <span>{{ backendConnected ? 'Backend Connected' : 'Backend Disconnected' }}</span>
+        </div>
+      </div>
+      <div class="header-controls">
+        <button class="control-btn" (click)="toggleSystemPrompt()" [class.active]="showSystemPrompt">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 20h9"/>
+            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+          </svg>
+          System Prompt
+        </button>
+        <button class="control-btn" (click)="toggleDebugPanel()" [class.active]="showDebugPanel">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="m8 2 1.88 1.88"/>
+            <path d="M14.12 3.88 16 2"/>
+            <path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/>
+            <path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/>
+          </svg>
+          Debug
+        </button>
+      </div>
+    </div>
+
+    <!-- System Prompt Section -->
+    <div class="prompt-section" *ngIf="showSystemPrompt">
+      <div class="section-label">
+        <span>System Prompt Configuration</span>
+        <div class="prompt-actions">
+          <button class="action-btn" (click)="resetSystemPrompt()" title="Reset to default">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+              <path d="M21 3v5h-5"/>
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+              <path d="M3 21v-5h5"/>
+            </svg>
+          </button>
+          <button class="action-btn" (click)="validatePrompt()" title="Validate syntax">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="20,6 9,17 4,12"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <textarea
+        [(ngModel)]="systemPrompt"
+        class="system-prompt-textarea"
+        placeholder="Enter system prompt..."
+        rows="3">
+      </textarea>
+    </div>
+
+    <!-- Debug Panel -->
+    <div class="debug-section" *ngIf="showDebugPanel">
+      <div class="debug-tabs">
+        <button class="debug-tab"
+                [class.active]="activeDebugTab === 'logs'"
+                (click)="activeDebugTab = 'logs'">Logs</button>
+        <button class="debug-tab"
+                [class.active]="activeDebugTab === 'performance'"
+                (click)="activeDebugTab = 'performance'">Performance</button>
+        <button class="debug-tab"
+                [class.active]="activeDebugTab === 'sql'"
+                (click)="activeDebugTab = 'sql'">SQL Debug</button>
+      </div>
+
+      <div class="debug-content">
+        <div *ngIf="activeDebugTab === 'logs'" class="debug-logs">
+          <div class="log-entry" *ngFor="let log of debugLogs.slice(-5)" [class]="'log-' + log.level">
+            <span class="log-time">{{ log.timestamp | date:'HH:mm:ss' }}</span>
+            <span class="log-level">{{ log.level.toUpperCase() }}</span>
+            <span class="log-message">{{ log.message }}</span>
+          </div>
+          <div *ngIf="debugLogs.length === 0" class="empty-logs">No debug logs</div>
+        </div>
+
+        <div *ngIf="activeDebugTab === 'performance'" class="debug-performance">
+          <div class="perf-metric">
+            <span class="metric-label">Last Query Time:</span>
+            <span class="metric-value">{{ lastQueryTime || 'N/A' }}ms</span>
+          </div>
+          <div class="perf-metric">
+            <span class="metric-label">Total Queries:</span>
+            <span class="metric-value">{{ totalQueries }}</span>
+          </div>
+          <div class="perf-metric">
+            <span class="metric-label">Average Response:</span>
+            <span class="metric-value">{{ avgResponseTime || 'N/A' }}ms</span>
+          </div>
+        </div>
+
+        <div *ngIf="activeDebugTab === 'sql'" class="debug-sql">
+          <div class="sql-info" *ngIf="lastGeneratedSQL">
+            <div class="info-label">Last Generated SQL:</div>
+            <code class="sql-code">{{ lastGeneratedSQL }}</code>
+          </div>
+          <div *ngIf="!lastGeneratedSQL" class="empty-sql">No SQL queries generated yet</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat Messages Area -->
+  <div class="messages-container">
+    <div class="messages-content">
+      <!-- Welcome Screen -->
+      <div *ngIf="messages.length === 0" class="welcome-screen">
+        <div class="welcome-header">
+          <h1>OptimaX SQL Assistant</h1>
+          <p>Convert natural language to SQL queries with AI assistance</p>
+        </div>
+        
+        <div class="example-prompts">
+          <h3>Try these examples:</h3>
+          <div class="example-grid">
+            <button 
+              *ngFor="let prompt of examplePrompts" 
+              class="example-prompt"
+              (click)="useExamplePrompt(prompt)">
+              {{ prompt }}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Messages -->
+      <div class="messages-list" *ngIf="messages.length > 0">
+        <div
+          *ngFor="let message of messages; let i = index"
+          class="message"
+          [ngClass]="'message-' + message.type">
+          <div class="message-header" *ngIf="message.type === 'ai'">
+            <div class="message-meta">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M9 12l2 2 4-4"/>
+                <circle cx="12" cy="12" r="10"/>
+              </svg>
+              <span>OptimaX Response</span>
+            </div>
+            <div class="message-actions">
+              <button class="action-btn" (click)="copyToClipboard(message.content)" title="Copy response">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                </svg>
+              </button>
+              <button class="action-btn" (click)="regenerateResponse(i)" title="Regenerate response">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+                  <path d="M21 3v5h-5"/>
+                  <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+                  <path d="M3 21v-5h5"/>
+                </svg>
+              </button>
+              <button class="action-btn" *ngIf="message.sqlQuery && debugMode" (click)="showSqlDetails(message.sqlQuery)" title="View SQL">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0H5a2 2 0 0 1-2-2v-4m6 6h10a2 2 0 0 1 2-2v-4"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div class="message-content">
+            <pre *ngIf="message.type === 'ai'" class="message-text sql-response">{{ message.content }}</pre>
+            <div *ngIf="message.type === 'user'" class="message-text">{{ message.content }}</div>
+          </div>
+          <div class="message-footer">
+            <div class="message-timestamp">
+              {{ message.timestamp | date:'short' }}
+            </div>
+            <div class="message-stats" *ngIf="message.type === 'ai' && debugMode">
+              <span class="stat" *ngIf="message.responseTime">{{ message.responseTime }}ms</span>
+              <span class="stat" *ngIf="message.sqlQuery">SQL Generated</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- User Input Section -->
+  <div class="input-section">
+    <div class="input-controls" *ngIf="messages.length > 0">
+      <div class="left-controls">
+        <span class="query-count">{{ messages.length / 2 | number:'1.0-0' }} queries</span>
+        <button class="control-btn small" (click)="exportHistory()" title="Export chat history">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7,10 12,15 17,10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+        </button>
+      </div>
+      <div class="right-controls">
+        <button class="clear-chat-btn" (click)="clearChat()">
+          Clear Chat
+        </button>
+      </div>
+    </div>
+    
+    <div class="input-container">
+      <div class="input-enhancements">
+        <button class="enhancement-btn" [class.active]="autoCompleteEnabled" (click)="toggleAutoComplete()" title="Auto-complete">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="m3 17 6-6 4 4 8-8"/>
+            <path d="m14 5 4 4"/>
+          </svg>
+        </button>
+        <button class="enhancement-btn" [class.active]="debugMode" (click)="toggleDebugMode()" title="Debug mode">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="m8 2 1.88 1.88"/>
+            <path d="M14.12 3.88 16 2"/>
+            <path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/>
+          </svg>
+        </button>
+      </div>
+      <textarea
+        #inputTextarea
+        [(ngModel)]="userInput"
+        (keypress)="onKeyPress($event)"
+        (input)="onInputChange()"
+        class="user-input"
+        placeholder="Ask me to convert natural language to SQL... (Enter to send, Shift+Enter for new line)"
+        rows="3">
+      </textarea>
+      <div class="input-actions">
+        <div class="input-stats" *ngIf="userInput.length > 0">
+          <span class="char-count">{{ userInput.length }}</span>
+        </div>
+        <button
+          class="send-button"
+          (click)="sendMessage()"
+          [disabled]="!userInput.trim() || isLoading"
+          [class.loading]="isLoading">
+          <svg *ngIf="!isLoading" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M2 12L22 2L13 21L11 13L2 12Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+          </svg>
+          <svg *ngIf="isLoading" class="loading-spinner" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 12a9 9 0 11-6.219-8.56"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
+  
+  </div> <!-- Close main-content -->
+</div> <!-- Close chat-container -->
+</div> <!-- Close app-wrapper -->
+
+<!-- System Prompt Modal -->
+<div class="modal-overlay" *ngIf="showSystemPromptModal" (click)="closeSystemPromptModal()">
+  <div class="system-prompt-modal" (click)="$event.stopPropagation()">
+    <div class="modal-header">
+      <div class="modal-title">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 20h9"/>
+          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+        </svg>
+        <h3>System Prompt Editor</h3>
+      </div>
+      <button class="modal-close" (click)="closeSystemPromptModal()">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
+    </div>
+    
+    <div class="modal-info">
+      <span class="info-text">Developer Mode: Modify the AI assistant's behavior and expertise</span>
+      <div class="modal-actions">
+        <button class="action-btn reset-btn" (click)="resetSystemPrompt()" title="Reset to default">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+            <path d="M21 3v5h-5"/>
+            <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+            <path d="M3 21v-5h5"/>
+          </svg>
+          Reset
+        </button>
+        <button class="action-btn test-btn" (click)="testSystemPrompt()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M8 5l3 3-3 3"/>
+            <line x1="12" y1="12" x2="21" y2="12"/>
+          </svg>
+          Test
+        </button>
+      </div>
+    </div>
+    
+    <div class="modal-body">
+      <textarea 
+        [(ngModel)]="systemPrompt" 
+        class="system-prompt-editor"
+        placeholder="Enter your custom system prompt here..."
+        #promptTextarea>
+      </textarea>
+    </div>
+    
+    <div class="modal-footer">
+      <div class="prompt-stats">
+        <span>{{ getPromptStats() }}</span>
+      </div>
+      <div class="footer-actions">
+        <button class="modal-btn secondary" (click)="closeSystemPromptModal()">
+          Cancel
+        </button>
+        <button class="modal-btn primary" (click)="saveSystemPrompt()">
+          Save & Apply
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
