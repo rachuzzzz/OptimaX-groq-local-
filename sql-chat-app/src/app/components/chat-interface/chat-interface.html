@@ -6,6 +6,7 @@
     <div class="sidebar-logo">
       <div class="logo" *ngIf="sidebarExpanded">
         <h1>OptimaX</h1>
+        <span class="logo-subtitle">SQL Chat Assistant</span>
       </div>
       <div class="logo-collapsed" *ngIf="!sidebarExpanded">
         <span>OX</span>
@@ -51,18 +52,14 @@
     <div class="sidebar-content" *ngIf="sidebarExpanded">
       <div class="sidebar-section">
         <h3>System Prompt</h3>
-        <div class="sidebar-item">
-          <button class="system-prompt-toggle" (click)="openSystemPromptModal()">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 20h9"/>
-              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
-            </svg>
-            <span>Edit System Prompt</span>
-          </button>
-          <div class="prompt-status-indicator">
-            <span class="status-text" [class.custom]="isUsingCustomPrompt">
-              {{ isUsingCustomPrompt ? 'Custom Prompt Active' : 'Default Prompt' }}
-            </span>
+        <div class="sidebar-item system-prompt-item" (click)="openSystemPromptManager()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 20h9"/>
+            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+          </svg>
+          <span>System Prompts</span>
+          <div class="prompt-status-badge" [class.custom]="isUsingCustomPrompt">
+            {{ isUsingCustomPrompt ? 'CUSTOM' : 'DEFAULT' }}
           </div>
         </div>
       </div>
@@ -135,6 +132,48 @@
           <span class="empty-state">No recent queries</span>
         </div>
       </div>
+
+      <!-- System Health Section -->
+      <div class="sidebar-section system-health">
+        <h3>System Health</h3>
+        <div class="health-indicators">
+          <div class="health-item" [class.connected]="backendConnected">
+            <div class="health-dot" [class.connected]="backendConnected"></div>
+            <div class="health-info">
+              <span class="health-label">Backend API</span>
+              <span class="health-status">{{ backendConnected ? 'Connected' : 'Disconnected' }}</span>
+            </div>
+          </div>
+          <div class="health-item" [class.connected]="totalQueries > 0">
+            <div class="health-dot" [class.connected]="totalQueries > 0"></div>
+            <div class="health-info">
+              <span class="health-label">SQL Engine</span>
+              <span class="health-status">{{ totalQueries > 0 ? 'Active' : 'Idle' }}</span>
+            </div>
+          </div>
+          <div class="health-item" [class.connected]="!isLoading">
+            <div class="health-dot" [class.connected]="!isLoading"></div>
+            <div class="health-info">
+              <span class="health-label">System Status</span>
+              <span class="health-status">{{ isLoading ? 'Processing' : 'Ready' }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="health-metrics" *ngIf="backendConnected">
+          <div class="metric-row">
+            <span class="metric-label">Queries:</span>
+            <span class="metric-value">{{ totalQueries }}</span>
+          </div>
+          <div class="metric-row" *ngIf="lastQueryTime">
+            <span class="metric-label">Last Response:</span>
+            <span class="metric-value">{{ lastQueryTime }}ms</span>
+          </div>
+          <div class="metric-row" *ngIf="sqlQueryHistory.length > 0">
+            <span class="metric-label">Success Rate:</span>
+            <span class="metric-value">{{ ((getSQLStats().successful / getSQLStats().total) * 100).toFixed(0) }}%</span>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -151,13 +190,6 @@
         </div>
       </div>
       <div class="header-controls">
-        <button class="control-btn" (click)="toggleSystemPrompt()" [class.active]="showSystemPrompt">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 20h9"/>
-            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
-          </svg>
-          System Prompt
-        </button>
         <button class="control-btn" (click)="toggleDebugPanel()" [class.active]="showDebugPanel">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="m8 2 1.88 1.88"/>
@@ -170,33 +202,6 @@
       </div>
     </div>
 
-    <!-- System Prompt Section -->
-    <div class="prompt-section" *ngIf="showSystemPrompt">
-      <div class="section-label">
-        <span>System Prompt Configuration</span>
-        <div class="prompt-actions">
-          <button class="action-btn" (click)="resetSystemPrompt()" title="Reset to default">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
-              <path d="M21 3v5h-5"/>
-              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
-              <path d="M3 21v-5h5"/>
-            </svg>
-          </button>
-          <button class="action-btn" (click)="validatePrompt()" title="Validate syntax">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="20,6 9,17 4,12"/>
-            </svg>
-          </button>
-        </div>
-      </div>
-      <textarea
-        [(ngModel)]="systemPrompt"
-        class="system-prompt-textarea"
-        placeholder="Enter system prompt..."
-        rows="3">
-      </textarea>
-    </div>
 
     <!-- Debug Panel -->
     <div class="debug-section" *ngIf="showDebugPanel">
@@ -238,11 +243,83 @@
         </div>
 
         <div *ngIf="activeDebugTab === 'sql'" class="debug-sql">
-          <div class="sql-info" *ngIf="lastGeneratedSQL">
-            <div class="info-label">Last Generated SQL:</div>
-            <code class="sql-code">{{ lastGeneratedSQL }}</code>
+          <!-- SQL Statistics Header -->
+          <div class="sql-stats-header" *ngIf="sqlQueryHistory.length > 0">
+            <div class="stats-grid">
+              <div class="stat-item">
+                <span class="stat-label">Total Queries:</span>
+                <span class="stat-value">{{ getSQLStats().total }}</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">Successful:</span>
+                <span class="stat-value success">{{ getSQLStats().successful }}</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">Failed:</span>
+                <span class="stat-value error">{{ getSQLStats().failed }}</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">Avg Response:</span>
+                <span class="stat-value">{{ getSQLStats().avgResponseTime }}ms</span>
+              </div>
+            </div>
+            <button class="clear-history-btn" (click)="clearSQLHistory()" title="Clear SQL History">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 6h18"/>
+                <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/>
+                <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+              </svg>
+              Clear History
+            </button>
           </div>
-          <div *ngIf="!lastGeneratedSQL" class="empty-sql">No SQL queries generated yet</div>
+
+          <!-- SQL Query History -->
+          <div class="sql-history" *ngIf="sqlQueryHistory.length > 0">
+            <div class="sql-entry" *ngFor="let entry of sqlQueryHistory; let i = index" [class.error]="!entry.success">
+              <div class="sql-entry-header">
+                <div class="entry-meta">
+                  <span class="entry-id">#{{ entry.id }}</span>
+                  <span class="entry-time">{{ entry.timestamp | date:'HH:mm:ss' }}</span>
+                  <span class="entry-response-time">{{ entry.responseTime }}ms</span>
+                  <span class="entry-status" [class.success]="entry.success" [class.error]="!entry.success">
+                    {{ entry.success ? 'SUCCESS' : 'ERROR' }}
+                  </span>
+                </div>
+                <div class="entry-actions">
+                  <button class="action-btn" (click)="copySQLQuery(entry.query)" title="Copy SQL">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <div class="sql-question">
+                <strong>Question:</strong> {{ entry.userQuestion }}
+              </div>
+              <div class="sql-query-container">
+                <pre class="sql-query">{{ formatSQLQuery(entry.query) }}</pre>
+              </div>
+              <div class="sql-error" *ngIf="entry.error">
+                <strong>Error:</strong> {{ entry.error }}
+              </div>
+            </div>
+          </div>
+
+          <!-- Last Generated SQL (fallback) -->
+          <div class="sql-info" *ngIf="lastGeneratedSQL && sqlQueryHistory.length === 0">
+            <div class="info-label">Last Generated SQL:</div>
+            <code class="sql-code">{{ formatSQLQuery(lastGeneratedSQL) }}</code>
+          </div>
+
+          <!-- Empty State -->
+          <div *ngIf="sqlQueryHistory.length === 0 && !lastGeneratedSQL" class="empty-sql">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+              <path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0H5a2 2 0 0 1-2-2v-4m6 6h10a2 2 0 0 1 2-2v-4"/>
+            </svg>
+            <p>No SQL queries generated yet</p>
+            <span>Send a message to generate SQL queries for debugging</span>
+          </div>
         </div>
       </div>
     </div>
@@ -310,6 +387,14 @@
           <div class="message-content">
             <pre *ngIf="message.type === 'ai'" class="message-text sql-response">{{ message.content }}</pre>
             <div *ngIf="message.type === 'user'" class="message-text">{{ message.content }}</div>
+            <div *ngIf="message.type === 'thinking'" class="message-text thinking-text">
+              {{ message.content }}
+              <div class="thinking-dots">
+                <div class="dot"></div>
+                <div class="dot"></div>
+                <div class="dot"></div>
+              </div>
+            </div>
           </div>
           <div class="message-footer">
             <div class="message-timestamp">
@@ -394,68 +479,22 @@
 </div> <!-- Close chat-container -->
 </div> <!-- Close app-wrapper -->
 
-<!-- System Prompt Modal -->
-<div class="modal-overlay" *ngIf="showSystemPromptModal" (click)="closeSystemPromptModal()">
-  <div class="system-prompt-modal" (click)="$event.stopPropagation()">
-    <div class="modal-header">
-      <div class="modal-title">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M12 20h9"/>
-          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
-        </svg>
-        <h3>System Prompt Editor</h3>
-      </div>
-      <button class="modal-close" (click)="closeSystemPromptModal()">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+<!-- Removed old system prompt modal - now using unified manager -->
+
+<!-- System Prompt Manager Modal -->
+<div class="modal-overlay system-prompt-manager-overlay" *ngIf="showSystemPromptManager" (click)="closeSystemPromptManager()">
+  <div class="system-prompt-manager-modal" (click)="$event.stopPropagation()">
+    <div class="manager-modal-header">
+      <h3>System Prompts</h3>
+      <button class="close-button" (click)="closeSystemPromptManager()">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="18" y1="6" x2="6" y2="18"></line>
           <line x1="6" y1="6" x2="18" y2="18"></line>
         </svg>
       </button>
     </div>
-    
-    <div class="modal-info">
-      <span class="info-text">Developer Mode: Modify the AI assistant's behavior and expertise</span>
-      <div class="modal-actions">
-        <button class="action-btn reset-btn" (click)="resetSystemPrompt()" title="Reset to default">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
-            <path d="M21 3v5h-5"/>
-            <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
-            <path d="M3 21v-5h5"/>
-          </svg>
-          Reset
-        </button>
-        <button class="action-btn test-btn" (click)="testSystemPrompt()">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M8 5l3 3-3 3"/>
-            <line x1="12" y1="12" x2="21" y2="12"/>
-          </svg>
-          Test
-        </button>
-      </div>
-    </div>
-    
-    <div class="modal-body">
-      <textarea 
-        [(ngModel)]="systemPrompt" 
-        class="system-prompt-editor"
-        placeholder="Enter your custom system prompt here..."
-        #promptTextarea>
-      </textarea>
-    </div>
-    
-    <div class="modal-footer">
-      <div class="prompt-stats">
-        <span>{{ getPromptStats() }}</span>
-      </div>
-      <div class="footer-actions">
-        <button class="modal-btn secondary" (click)="closeSystemPromptModal()">
-          Cancel
-        </button>
-        <button class="modal-btn primary" (click)="saveSystemPrompt()">
-          Save & Apply
-        </button>
-      </div>
+    <div class="manager-modal-content">
+      <app-system-prompt-manager></app-system-prompt-manager>
     </div>
   </div>
 </div>

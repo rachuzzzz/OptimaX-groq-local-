@@ -1,10 +1,12 @@
 import { Component, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { trigger, state, style, transition, animate } from '@angular/animations';
 import { ChatService, ChatResponse } from '../../services/chat.service';
+import { SystemPromptManagerComponent } from '../system-prompt-manager/system-prompt-manager';
 
 interface Message {
-  type: 'user' | 'ai';
+  type: 'user' | 'ai' | 'thinking';
   content: string;
   timestamp: Date;
   sqlQuery?: string;
@@ -24,12 +26,34 @@ interface TableInfo {
   total_records: number;
 }
 
+interface SQLQueryEntry {
+  id: number;
+  query: string;
+  userQuestion: string;
+  timestamp: Date;
+  responseTime: number;
+  success: boolean;
+  error?: string;
+}
+
 @Component({
   selector: 'app-chat-interface',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, SystemPromptManagerComponent],
   templateUrl: './chat-interface.html',
-  styleUrl: './chat-interface.scss'
+  styleUrl: './chat-interface.scss',
+  animations: [
+    trigger('fadeInOut', [
+      state('in', style({opacity: 1})),
+      transition(':enter', [
+        style({opacity: 0}),
+        animate(300, style({opacity: 1}))
+      ]),
+      transition(':leave', [
+        animate(300, style({opacity: 0}))
+      ])
+    ])
+  ]
 })
 export class ChatInterfaceComponent implements OnInit {
   systemPrompt: string = `You are OptimaX, an expert SQL query generator and data analyst. Convert natural language questions into PostgreSQL queries and present results in a clear, formatted manner.
@@ -98,14 +122,13 @@ Example patterns:
   userInput: string = '';
   messages: Message[] = [];
   sidebarExpanded: boolean = true;
-  isLoading: boolean = false;
-  showSystemPromptModal: boolean = false;
+  isLoading: boolean = true; // Start with loading screen
+  showSystemPromptManager: boolean = false;
   isUsingCustomPrompt: boolean = false;
   originalSystemPrompt: string = '';
 
   // Developer mode properties
   debugMode: boolean = false;
-  showSystemPrompt: boolean = false;
   showDebugPanel: boolean = false;
   activeDebugTab: 'logs' | 'performance' | 'sql' = 'logs';
   debugLogs: DebugLog[] = [];
@@ -124,6 +147,10 @@ Example patterns:
 
   // Table information
   tableInfo: TableInfo | null = null;
+
+  // SQL Query tracking for debugging
+  sqlQueryHistory: SQLQueryEntry[] = [];
+  sqlQueryIdCounter: number = 1;
   
   private defaultSystemPrompt = `You are OptimaX, an expert SQL query generator and data analyst. Convert natural language questions into PostgreSQL queries and present results in a clear, formatted manner.
 
@@ -203,7 +230,54 @@ Example patterns:
   ngOnInit(): void {
     this.originalSystemPrompt = this.systemPrompt;
     this.addDebugLog('info', 'OptimaX Developer Console initialized');
-    this.checkBackendConnection();
+
+    // Initialize the application with loading screen
+    this.initializeApp();
+
+    // Listen for test prompt events from system prompt manager
+    document.addEventListener('testPrompt', (event: any) => {
+      this.userInput = event.detail.message;
+      // Auto-send the test message after a brief delay
+      setTimeout(() => {
+        this.sendMessage();
+      }, 500);
+    });
+
+    // Listen for close system prompt manager events
+    document.addEventListener('closeSystemPromptManager', () => {
+      this.closeSystemPromptManager();
+    });
+  }
+
+  private async initializeApp(): Promise<void> {
+    try {
+      // Simulate initialization steps
+      await this.delay(1000); // Initial setup
+      this.addDebugLog('info', 'Connecting to backend...');
+
+      await this.delay(800);
+      this.checkBackendConnection();
+      this.addDebugLog('info', 'Backend connection established');
+
+      await this.delay(500);
+      this.addDebugLog('info', 'Loading system prompts...');
+
+      await this.delay(700);
+      this.addDebugLog('info', 'OptimaX ready for use');
+
+      // Hide loading screen
+      this.isLoading = false;
+    } catch (error) {
+      this.addDebugLog('error', 'Failed to initialize application');
+      // Still hide loading screen even if there's an error
+      setTimeout(() => {
+        this.isLoading = false;
+      }, 2000);
+    }
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   sendMessage(): void {
@@ -222,6 +296,13 @@ Example patterns:
         timestamp: new Date()
       });
 
+      // Add thinking indicator
+      this.messages.push({
+        type: 'thinking',
+        content: 'OptimaX is thinking...',
+        timestamp: new Date()
+      });
+
       this.userInput = '';
       this.isLoading = true;
       this.totalQueries++;
@@ -230,7 +311,8 @@ Example patterns:
 
       const chatMessage = {
         message: userMessage,
-        system_prompt: this.isUsingCustomPrompt ? this.systemPrompt : undefined
+        system_prompt: this.isUsingCustomPrompt ? this.systemPrompt : undefined,
+        include_sql: true
       };
 
       this.chatService.sendMessage(chatMessage).subscribe({
@@ -240,7 +322,26 @@ Example patterns:
 
           if (response.sql_query) {
             this.lastGeneratedSQL = response.sql_query;
+
+            // Add to SQL query history for debugging
+            this.sqlQueryHistory.unshift({
+              id: this.sqlQueryIdCounter++,
+              query: response.sql_query,
+              userQuestion: userMessage,
+              timestamp: new Date(),
+              responseTime: responseTime,
+              success: !response.error,
+              error: response.error
+            });
+
+            // Keep only last 20 queries to prevent memory issues
+            if (this.sqlQueryHistory.length > 20) {
+              this.sqlQueryHistory = this.sqlQueryHistory.slice(0, 20);
+            }
           }
+
+          // Remove thinking indicator
+          this.messages = this.messages.filter(msg => msg.type !== 'thinking');
 
           this.messages.push({
             type: 'ai',
@@ -262,6 +363,9 @@ Example patterns:
         error: (error) => {
           const responseTime = Date.now() - queryStartTime;
           this.addDebugLog('error', `Query failed: ${error.message || 'Unknown error'}`);
+
+          // Remove thinking indicator
+          this.messages = this.messages.filter(msg => msg.type !== 'thinking');
 
           this.messages.push({
             type: 'ai',
@@ -297,28 +401,15 @@ Example patterns:
     this.sidebarExpanded = !this.sidebarExpanded;
   }
 
-  openSystemPromptModal(): void {
-    this.showSystemPromptModal = true;
+
+  openSystemPromptManager(): void {
+    this.showSystemPromptManager = true;
   }
 
-  closeSystemPromptModal(): void {
-    this.showSystemPromptModal = false;
+  closeSystemPromptManager(): void {
+    this.showSystemPromptManager = false;
   }
 
-  resetSystemPrompt(): void {
-    this.systemPrompt = this.defaultSystemPrompt;
-    this.isUsingCustomPrompt = false;
-  }
-
-  saveSystemPrompt(): void {
-    this.isUsingCustomPrompt = this.systemPrompt !== this.defaultSystemPrompt;
-    this.showSystemPromptModal = false;
-  }
-
-  testSystemPrompt(): void {
-    this.userInput = 'Test: Show me accidents in Texas with high severity';
-    this.showSystemPromptModal = false;
-  }
 
   getPromptStats(): string {
     const chars = this.systemPrompt.length;
@@ -334,9 +425,6 @@ Example patterns:
     this.saveToStorage();
   }
 
-  toggleSystemPrompt(): void {
-    this.showSystemPrompt = !this.showSystemPrompt;
-  }
 
   toggleDebugPanel(): void {
     this.showDebugPanel = !this.showDebugPanel;
@@ -445,18 +533,43 @@ Example patterns:
     alert(`Query Analytics:\n\nTotal Queries: ${this.totalQueries}\nMessages: ${this.messages.length}`);
   }
 
-  validatePrompt(): void {
-    const charCount = this.systemPrompt.length;
-    if (charCount < 50) {
-      alert('System prompt might be too short');
-    } else if (charCount > 2000) {
-      alert('System prompt might be too long');
-    } else {
-      alert('System prompt validation passed');
-    }
-  }
 
   onInputChange(): void {
     // Auto-complete logic placeholder
+  }
+
+  // SQL Debug utility functions
+  clearSQLHistory(): void {
+    this.sqlQueryHistory = [];
+    this.addDebugLog('info', 'SQL query history cleared');
+  }
+
+  copySQLQuery(query: string): void {
+    navigator.clipboard.writeText(query);
+    this.addDebugLog('info', 'SQL query copied to clipboard');
+  }
+
+  formatSQLQuery(query: string): string {
+    // Basic SQL formatting
+    return query
+      .replace(/SELECT/gi, '\nSELECT')
+      .replace(/FROM/gi, '\nFROM')
+      .replace(/WHERE/gi, '\nWHERE')
+      .replace(/GROUP BY/gi, '\nGROUP BY')
+      .replace(/ORDER BY/gi, '\nORDER BY')
+      .replace(/HAVING/gi, '\nHAVING')
+      .replace(/LIMIT/gi, '\nLIMIT')
+      .trim();
+  }
+
+  getSQLStats(): { total: number; successful: number; failed: number; avgResponseTime: number } {
+    const total = this.sqlQueryHistory.length;
+    const successful = this.sqlQueryHistory.filter(q => q.success).length;
+    const failed = total - successful;
+    const avgResponseTime = total > 0
+      ? Math.round(this.sqlQueryHistory.reduce((sum, q) => sum + q.responseTime, 0) / total)
+      : 0;
+
+    return { total, successful, failed, avgResponseTime };
   }
 }

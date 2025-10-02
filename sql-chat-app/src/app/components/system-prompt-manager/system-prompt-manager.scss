@@ -1,0 +1,255 @@
+.system-prompt-manager {
+  padding: 2rem;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  max-width: 800px;
+  margin: 0 auto;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+
+  .manager-header {
+    text-align: center;
+    margin-bottom: 2rem;
+
+    h2 {
+      margin: 0;
+      font-size: 1.5rem;
+      font-weight: 600;
+      color: #1f2937;
+    }
+
+    p {
+      margin: 0.5rem 0 0 0;
+      color: #6b7280;
+      font-size: 0.9rem;
+    }
+  }
+
+  .loading {
+    text-align: center;
+    padding: 2rem;
+    color: #6b7280;
+  }
+
+  .message {
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+    font-size: 0.9rem;
+
+    &.message-success {
+      background-color: #d1fae5;
+      color: #065f46;
+      border: 1px solid #a7f3d0;
+    }
+
+    &.message-error {
+      background-color: #fee2e2;
+      color: #991b1b;
+      border: 1px solid #fca5a5;
+    }
+
+    &.message-info {
+      background-color: #dbeafe;
+      color: #1e40af;
+      border: 1px solid #93c5fd;
+    }
+  }
+
+  .tabs {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 2rem;
+    border-bottom: 1px solid #e5e7eb;
+
+    .tab {
+      padding: 0.75rem 1.5rem;
+      border: none;
+      background: none;
+      cursor: pointer;
+      font-size: 0.9rem;
+      font-weight: 500;
+      color: #6b7280;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s ease;
+      position: relative;
+
+      &:hover {
+        color: #374151;
+      }
+
+      &.active {
+        color: #3b82f6;
+        border-bottom-color: #3b82f6;
+      }
+
+      .modified {
+        color: #f59e0b;
+        font-size: 1.2rem;
+        margin-left: 0.5rem;
+      }
+    }
+  }
+
+  .editor {
+    h3 {
+      margin: 0 0 0.5rem 0;
+      font-size: 1.2rem;
+      font-weight: 600;
+      color: #1f2937;
+    }
+
+    p {
+      margin: 0 0 1.5rem 0;
+      color: #6b7280;
+      font-size: 0.9rem;
+    }
+
+    .prompt-input {
+      width: 100%;
+      min-height: 300px;
+      padding: 1rem;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+      font-size: 0.9rem;
+      line-height: 1.5;
+      resize: vertical;
+      transition: border-color 0.2s ease;
+
+      &:focus {
+        outline: none;
+        border-color: #3b82f6;
+        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+      }
+
+      &::placeholder {
+        color: #9ca3af;
+      }
+    }
+
+    .actions {
+      display: flex;
+      gap: 1rem;
+      margin-top: 1rem;
+
+      .btn {
+        padding: 0.75rem 1.5rem;
+        border-radius: 6px;
+        font-size: 0.9rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        border: none;
+
+        &:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
+        &.primary {
+          background-color: #3b82f6;
+          color: white;
+
+          &:hover:not(:disabled) {
+            background-color: #2563eb;
+          }
+        }
+
+        &.secondary {
+          background-color: #f3f4f6;
+          color: #374151;
+          border: 1px solid #d1d5db;
+
+          &:hover:not(:disabled) {
+            background-color: #e5e7eb;
+          }
+        }
+      }
+    }
+  }
+}
+
+// Dark theme support
+@media (prefers-color-scheme: dark) {
+  .system-prompt-manager {
+    // Ensure scrolling works in dark mode
+    overflow-y: auto;
+    overflow-x: hidden;
+    .manager-header h2 {
+      color: #f9fafb;
+    }
+
+    .manager-header p {
+      color: #9ca3af;
+    }
+
+    .tabs .tab {
+      color: #9ca3af;
+
+      &:hover {
+        color: #d1d5db;
+      }
+
+      &.active {
+        color: #60a5fa;
+        border-bottom-color: #60a5fa;
+      }
+    }
+
+    .editor {
+      h3 {
+        color: #f9fafb;
+      }
+
+      p {
+        color: #9ca3af;
+      }
+
+      .prompt-input {
+        background-color: #1f2937;
+        border-color: #374151;
+        color: #f9fafb;
+
+        &:focus {
+          border-color: #60a5fa;
+          box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.1);
+        }
+
+        &::placeholder {
+          color: #6b7280;
+        }
+      }
+
+      .actions .btn.secondary {
+        background-color: #374151;
+        color: #d1d5db;
+        border-color: #4b5563;
+
+        &:hover:not(:disabled) {
+          background-color: #4b5563;
+        }
+      }
+    }
+
+    .message {
+      &.message-success {
+        background-color: rgba(34, 197, 94, 0.1);
+        color: #4ade80;
+        border-color: rgba(34, 197, 94, 0.2);
+      }
+
+      &.message-error {
+        background-color: rgba(239, 68, 68, 0.1);
+        color: #f87171;
+        border-color: rgba(239, 68, 68, 0.2);
+      }
+
+      &.message-info {
+        background-color: rgba(59, 130, 246, 0.1);
+        color: #60a5fa;
+        border-color: rgba(59, 130, 246, 0.2);
+      }
+    }
+  }
+}
