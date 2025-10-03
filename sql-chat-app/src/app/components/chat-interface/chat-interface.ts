@@ -151,7 +151,10 @@ Example patterns:
   // SQL Query tracking for debugging
   sqlQueryHistory: SQLQueryEntry[] = [];
   sqlQueryIdCounter: number = 1;
-  
+
+  // Time-based greeting
+  greeting: string = '';
+
   private defaultSystemPrompt = `You are OptimaX, an expert SQL query generator and data analyst. Convert natural language questions into PostgreSQL queries and present results in a clear, formatted manner.
 
 DATABASE SCHEMA - us_accidents table (7,728,394 records):
@@ -225,6 +228,7 @@ Example patterns:
 
   constructor(private chatService: ChatService) {
     this.loadFromStorage();
+    this.setGreeting();
   }
 
   ngOnInit(): void {
@@ -571,5 +575,19 @@ Example patterns:
       : 0;
 
     return { total, successful, failed, avgResponseTime };
+  }
+
+  setGreeting(): void {
+    const hour = new Date().getHours();
+
+    if (hour >= 5 && hour < 12) {
+      this.greeting = 'Good Morning';
+    } else if (hour >= 12 && hour < 17) {
+      this.greeting = 'Good Afternoon';
+    } else if (hour >= 17 && hour < 22) {
+      this.greeting = 'Good Evening';
+    } else {
+      this.greeting = 'Good Night';
+    }
   }
 }

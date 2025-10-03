@@ -7,40 +7,52 @@
   height: 100vh;
   width: 100vw;
   position: relative;
+  background: linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 50%, #0f0f0f 100%);
+
+  // Circuit board pattern overlay with gold accent
+  &::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-image:
+      radial-gradient(circle at 20% 80%, rgba(212, 175, 55, 0.08) 0%, transparent 50%),
+      radial-gradient(circle at 80% 20%, rgba(212, 175, 55, 0.08) 0%, transparent 50%),
+      radial-gradient(circle at 40% 40%, rgba(212, 175, 55, 0.05) 0%, transparent 50%),
+      linear-gradient(90deg, rgba(212, 175, 55, 0.05) 1px, transparent 1px),
+      linear-gradient(0deg, rgba(212, 175, 55, 0.05) 1px, transparent 1px);
+    background-size: 100% 100%, 100% 100%, 100% 100%, 50px 50px, 50px 50px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  // Animated circuit connections with pale gold
+  &::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-image:
+      linear-gradient(45deg, transparent 48%, rgba(212, 175, 55, 0.06) 49%, rgba(212, 175, 55, 0.06) 51%, transparent 52%),
+      linear-gradient(-45deg, transparent 48%, rgba(212, 175, 55, 0.06) 49%, rgba(212, 175, 55, 0.06) 51%, transparent 52%);
+    background-size: 100px 100px, 100px 100px;
+    opacity: 0.3;
+    pointer-events: none;
+    z-index: 0;
+  }
 }
 
 .main-app {
   height: 100vh;
   width: 100vw;
   opacity: 0;
-  
-  &.fade-in {
-    animation: fadeInApp 1s ease-out forwards;
-  }
-}
-
-@keyframes fadeInApp {
-  from {
-    opacity: 0;
-    transform: translateY(20px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.app-container {
-  height: 100vh;
-  width: 100vw;
   position: relative;
-}
+  z-index: 1;
 
-.main-app {
-  height: 100vh;
-  width: 100vw;
-  opacity: 0;
-  
   &.fade-in {
     animation: fadeInApp 1s ease-out forwards;
   }
