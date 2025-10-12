@@ -8,12 +8,17 @@ import logging
 from sqlalchemy import create_engine, text
 import sqlparse
 import re
-import requests
 from datetime import datetime
+import asyncio
+
+# Import optimization modules
+from heuristic_router import get_heuristic_router
+from async_inference import get_inference_engine, cleanup_inference_engine
+from query_cache import get_query_cache
 
 load_dotenv()
 
-app = FastAPI(title="OptimaX SQL Chat API")
+app = FastAPI(title="OptimaX SQL Chat API - Optimized")
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,10 +28,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize router model globally
-router_pipeline = None
+# Initialize optimization components
+heuristic_router = get_heuristic_router(fallback_to_llm=True)
+inference_engine = get_inference_engine()
+query_cache = get_query_cache(max_size=500, default_ttl=3600)
 
 AVAILABLE_SQL_MODELS = {
     "qwen2.5-coder:3b": "Qwen2.5-Coder 3B - Fast SQL generation",
@@ -88,52 +96,84 @@ PostgreSQL Query (MUST use aggregation):"""
 current_intent_prompt = DEFAULT_INTENT_PROMPT
 current_sql_prompt = DEFAULT_SQL_PROMPT
 
-def initialize_router_model():
-    """Initialize Phi-3 via Ollama for query routing"""
-    global router_pipeline
-    try:
-        # Use local Ollama Phi-3
-        from llama_index.llms.ollama import Ollama
+# Performance metrics
+performance_metrics = {
+    "total_requests": 0,
+    "heuristic_hits": 0,
+    "llm_fallbacks": 0,
+    "cache_hits": 0,
+    "avg_response_time": 0.0,
+    "response_times": []
+}
 
-        router_pipeline = Ollama(
-            model="phi3:mini",  # Use your specific phi3:mini model
-            base_url="http://localhost:11434",
-            temperature=0.1,
-            request_timeout=60.0  # Increased timeout for intent classification
-        )
-        logger.info("Router model (Ollama Phi-3) connected successfully")
-    except Exception as e:
-        logger.error(f"Failed to connect to Ollama Phi-3: {str(e)}")
-        router_pipeline = None
-        logger.error("Ollama Phi-3 not available - system requires LLM models to function")
+async def route_query_optimized(user_message: str) -> str:
+    """
+    Optimized query routing with heuristics first, LLM fallback
 
-def route_query_with_llm(user_message: str) -> str:
-    """Route query using Ollama Phi-3 to classify as SQL_INTENT or CHAT_INTENT"""
-    if router_pipeline is None:
-        raise RuntimeError("Router model not loaded. Cannot process requests without LLM.")
+    Returns: "sql" or "chat"
+    """
+    # Check cache first
+    cached_route = query_cache.get_route_decision(user_message)
+    if cached_route:
+        logger.info(f"Route decision from cache: {cached_route}")
+        performance_metrics["cache_hits"] += 1
+        return cached_route
+
+    # Try heuristic routing first (fast, no LLM)
+    heuristic_result = heuristic_router.route(user_message)
+
+    if heuristic_result is not None:
+        # High confidence heuristic decision
+        confidence = heuristic_router.get_confidence(user_message)
+        logger.info(f"Heuristic routing: {heuristic_result} (confidence: {confidence:.2f})")
+        performance_metrics["heuristic_hits"] += 1
+
+        # Cache the decision
+        query_cache.cache_route_decision(user_message, heuristic_result)
+        return heuristic_result
+
+    # Fallback to LLM routing for ambiguous cases
+    logger.info("Ambiguous query, falling back to LLM routing")
+    performance_metrics["llm_fallbacks"] += 1
 
     input_text = f"{current_intent_prompt}\n\nUser question: {user_message}\n\nIntent:"
 
     try:
-        response = router_pipeline.complete(input_text)
-        generated_text = response.text.strip().upper()
+        generated_text = await inference_engine.generate_with_timeout(
+            model=INTENT_MODEL,
+            prompt=input_text,
+            temperature=0.1,
+            max_tokens=50,
+            timeout_seconds=15.0
+        )
+
+        generated_text = generated_text.strip().upper()
 
         if "SQL_INTENT" in generated_text:
-            return "sql"
+            route = "sql"
         elif "CHAT_INTENT" in generated_text:
-            return "chat"
+            route = "chat"
         else:
-            # No fallback - raise error if LLM doesn't provide clear intent
-            raise RuntimeError(f"LLM failed to classify intent. Response was: {generated_text}")
+            # Default to SQL if unclear
+            logger.warning(f"LLM unclear response: {generated_text}, defaulting to SQL")
+            route = "sql"
+
+        # Cache the decision
+        query_cache.cache_route_decision(user_message, route)
+        return route
+
     except Exception as e:
-        logger.error(f"Error calling Ollama Phi-3: {str(e)}")
-        raise RuntimeError(f"Intent classification failed: {str(e)}")
+        logger.error(f"LLM routing failed: {str(e)}, defaulting to SQL")
+        return "sql"  # Safe default
 
-
-def generate_chat_response(user_message: str) -> str:
-    """Generate chat response for general questions"""
-    if router_pipeline is None:
-        raise RuntimeError("Chat model not loaded. Cannot generate responses without LLM.")
+async def generate_chat_response_async(user_message: str) -> str:
+    """Generate chat response asynchronously"""
+    # Check cache first
+    cached_response = query_cache.get_chat_response(user_message)
+    if cached_response:
+        logger.info("Chat response from cache")
+        performance_metrics["cache_hits"] += 1
+        return cached_response
 
     chat_prompt = f"""You are OptimaX, a helpful AI assistant specialized in analyzing US traffic accident data.
 You are friendly and professional. Keep responses concise and helpful.
@@ -143,16 +183,23 @@ User: {user_message}
 Assistant:"""
 
     try:
-        response = router_pipeline.complete(chat_prompt)
-        generated_text = response.text.strip()
+        response = await inference_engine.generate_with_timeout(
+            model=INTENT_MODEL,
+            prompt=chat_prompt,
+            temperature=0.7,
+            max_tokens=200,
+            timeout_seconds=20.0
+        )
 
-        # No hardcoded extraction - trust LLM output directly
-        if not generated_text or len(generated_text) < 5:
-            raise RuntimeError("LLM generated chat response is too short or empty")
+        if not response or len(response) < 5:
+            raise RuntimeError("Chat response too short or empty")
 
-        return generated_text
+        # Cache the response
+        query_cache.cache_chat_response(user_message, response)
+        return response
+
     except Exception as e:
-        logger.error(f"Error generating chat response with Ollama: {str(e)}")
+        logger.error(f"Chat generation failed: {str(e)}")
         raise RuntimeError(f"Chat response generation failed: {str(e)}")
 
 class ChatMessage(BaseModel):
@@ -160,7 +207,7 @@ class ChatMessage(BaseModel):
     system_prompt: Optional[str] = None
     sql_model: Optional[str] = DEFAULT_SQL_MODEL
     include_sql: Optional[bool] = None
-    row_limit: Optional[int] = 50  # Default limit of 50 rows for aggregated results
+    row_limit: Optional[int] = 50
 
 class ChatResponse(BaseModel):
     response: str
@@ -170,9 +217,10 @@ class ChatResponse(BaseModel):
     query_results: Optional[List[Dict[str, Any]]] = None
     model_used: Optional[str] = None
     execution_time: Optional[float] = None
+    routing_method: Optional[str] = None  # "heuristic", "llm", "cache"
 
 class SystemPromptUpdate(BaseModel):
-    model_type: str  # "intent" or "sql"
+    model_type: str
     prompt: str
 
 class SystemPromptsResponse(BaseModel):
@@ -189,16 +237,12 @@ class TextToSQLEngine:
 
     def initialize(self):
         try:
-            # Initialize router model first
-            initialize_router_model()
-
             database_url = os.getenv("DATABASE_URL")
             if not database_url:
                 raise ValueError("DATABASE_URL not set in environment")
 
             self.engine = create_engine(database_url)
-
-            logger.info("Using local Ollama for SQL generation")
+            logger.info("Database connection established")
 
             # Get table schema information
             self.load_table_schema()
@@ -238,14 +282,12 @@ class TextToSQLEngine:
             raise
 
     def validate_sql(self, sql_query: str, row_limit: int = 50) -> tuple[bool, str]:
-        """Validate SQL for safety and syntax - fast rule-based approach"""
+        """Validate SQL for safety and syntax"""
         try:
-            # Parse SQL
             parsed = sqlparse.parse(sql_query)
             if not parsed:
                 return False, "Invalid SQL syntax"
 
-            # Check for dangerous operations
             dangerous_keywords = ['DROP', 'DELETE', 'UPDATE', 'ALTER', 'INSERT', 'CREATE', 'TRUNCATE']
             sql_upper = sql_query.upper()
 
@@ -253,27 +295,22 @@ class TextToSQLEngine:
                 if re.search(rf'\b{keyword}\b', sql_upper):
                     return False, f"Dangerous operation detected: {keyword}"
 
-            # Ensure it's a SELECT statement
             if not sql_upper.strip().startswith('SELECT'):
                 return False, "Only SELECT statements are allowed"
 
             # Add or update LIMIT clause
             if 'LIMIT' not in sql_upper:
-                # Add LIMIT for safety
                 if not sql_query.rstrip().endswith(';'):
                     sql_query = sql_query.rstrip() + f' LIMIT {row_limit};'
                 else:
                     sql_query = sql_query.rstrip(';') + f' LIMIT {row_limit};'
             else:
-                # Extract existing LIMIT value and enforce max
                 limit_match = re.search(r'LIMIT\s+(\d+)', sql_upper)
                 if limit_match:
                     existing_limit = int(limit_match.group(1))
                     if existing_limit > row_limit:
-                        # Replace with max allowed limit
                         sql_query = re.sub(r'LIMIT\s+\d+', f'LIMIT {row_limit}', sql_query, flags=re.IGNORECASE)
 
-            # Ensure query ends with semicolon
             if not sql_query.rstrip().endswith(';'):
                 sql_query = sql_query.rstrip() + ';'
 
@@ -282,71 +319,60 @@ class TextToSQLEngine:
         except Exception as e:
             return False, f"SQL validation error: {str(e)}"
 
-    def generate_sql(self, question: str, model_name: str = DEFAULT_SQL_MODEL, system_prompt: str = None) -> str:
-        """Generate SQL using local Ollama models"""
+    async def generate_sql_async(self, question: str, model_name: str = DEFAULT_SQL_MODEL, system_prompt: str = None) -> str:
+        """Generate SQL asynchronously using optimized inference"""
+        schema_text = self.table_schema.get("schema_text", "") if self.table_schema else ""
+
+        if system_prompt:
+            prompt = f"{system_prompt}\n\nQuestion: {question}"
+        else:
+            prompt = current_sql_prompt.format(schema_text=schema_text, question=question)
+
+        logger.info(f"Generating SQL with model {model_name}")
+
         try:
-            # Prepare specialized SQL prompt with schema grounding
-            schema_text = self.table_schema.get("schema_text", "") if self.table_schema else ""
-
-            if system_prompt:
-                prompt = f"{system_prompt}\n\nQuestion: {question}"
-            else:
-                # Use current SQL prompt with schema and question formatting
-                prompt = current_sql_prompt.format(schema_text=schema_text, question=question)
-
-            logger.info(f"Generating SQL with local Ollama model {model_name}: {question}")
-
-            # Call local Ollama API
-            ollama_url = f"{os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')}/api/generate"
-            payload = {
-                "model": model_name,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.1,
-                    "num_predict": 200
-                }
-            }
-
-            headers = {"Content-Type": "application/json"}
-            response = requests.post(ollama_url, json=payload, headers=headers, timeout=60)
-            response.raise_for_status()
-
-            result = response.json()
-            generated_sql = result.get("response", "").strip()
+            generated_sql = await inference_engine.generate_with_timeout(
+                model=model_name,
+                prompt=prompt,
+                temperature=0.1,
+                max_tokens=200,
+                timeout_seconds=30.0
+            )
 
             if not generated_sql:
-                raise Exception("Empty response from Ollama - LLM failed to generate SQL")
+                raise Exception("Empty response from model")
 
             # Extract SQL from markdown code blocks if present
             if "```" in generated_sql:
-                # Handle ```sql SELECT ... ``` or ``` SELECT ... ```
                 code_block_match = re.search(r'```(?:sql)?\s*(.*?)\s*```', generated_sql, re.DOTALL)
                 if code_block_match:
                     generated_sql = code_block_match.group(1).strip()
 
-            # Remove common prefixes that LLMs might add
+            # Remove common prefixes
             sql_prefixes = ["SQL:", "Query:", "PostgreSQL:", "SELECT"]
-            for prefix in sql_prefixes[:-1]:  # Don't strip SELECT itself
+            for prefix in sql_prefixes[:-1]:
                 if generated_sql.upper().startswith(prefix):
                     generated_sql = generated_sql[len(prefix):].strip()
 
-            logger.info(f"Local Ollama {model_name} generated SQL: {generated_sql}")
+            logger.info(f"Generated SQL: {generated_sql}")
             return generated_sql
 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error calling local Ollama API: {str(e)}")
-            raise Exception(f"SQL generation failed - Ollama API error: {str(e)}")
         except Exception as e:
-            logger.error(f"Error generating SQL with local Ollama: {str(e)}")
+            logger.error(f"Error generating SQL: {str(e)}")
             raise Exception(f"SQL generation failed: {str(e)}")
 
 
 query_engine_instance = TextToSQLEngine()
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    await cleanup_inference_engine()
+    logger.info("Inference engine cleaned up")
+
 @app.get("/")
 async def root():
-    return {"message": "OptimaX SQL Chat API is running"}
+    return {"message": "OptimaX SQL Chat API - Optimized", "version": "2.0"}
 
 @app.get("/health")
 async def health_check():
@@ -358,11 +384,10 @@ async def health_check():
         return {"status": "unhealthy", "error": str(e)}
 
 def format_sql_results(rows, columns):
-    """Format SQL results for display - simple and fast"""
+    """Format SQL results for display"""
     if not rows:
         return "No results found."
 
-    # Format header
     header = " | ".join(columns) if len(columns) > 1 else columns[0]
     separator = "-" * len(header)
 
@@ -370,17 +395,14 @@ def format_sql_results(rows, columns):
 
     for i, row in enumerate(rows):
         if len(row) == 2 and isinstance(row[1], (int, float)):
-            # Key-value pair with numeric value
             formatted_data.append(f"{row[0]} | {row[1]:,}")
         elif len(row) == 1:
-            # Single column result
             value = row[0]
             if isinstance(value, (int, float)) and value > 1000:
                 formatted_data.append(f"{value:,}")
             else:
                 formatted_data.append(str(value))
         else:
-            # Multi-column result
             row_data = []
             for col in row:
                 if isinstance(col, (int, float)) and col > 1000:
@@ -391,8 +413,7 @@ def format_sql_results(rows, columns):
                     row_data.append(str(col))
             formatted_data.append(" | ".join(row_data))
 
-    # Limit display to prevent overwhelming frontend
-    if len(formatted_data) > 52:  # 50 data rows + header + separator
+    if len(formatted_data) > 52:
         result_rows = formatted_data[:52]
         result_rows.append(f"\n... and {len(rows) - 50} more rows")
         return "\n".join(result_rows)
@@ -402,6 +423,7 @@ def format_sql_results(rows, columns):
 @app.post("/chat", response_model=ChatResponse)
 async def chat(message: ChatMessage):
     start_time = datetime.now()
+    performance_metrics["total_requests"] += 1
 
     try:
         # Validate sql_model if provided
@@ -412,34 +434,59 @@ async def chat(message: ChatMessage):
                 execution_time=(datetime.now() - start_time).total_seconds()
             )
 
-        # Route the query using LLM (Phi-3 Mini only for intent classification)
-        try:
-            route = route_query_with_llm(message.message)
-            logger.info(f"Query routed to: {route}")
-        except RuntimeError as router_error:
-            logger.error(f"Router model not available: {str(router_error)}")
+        # Check SQL query cache first
+        cached_sql_result = query_cache.get_sql_query(message.message)
+        if cached_sql_result and "query_results" in cached_sql_result:
+            logger.info("Complete SQL result from cache")
+            performance_metrics["cache_hits"] += 1
+
+            # Handle cached results
+            query_results = cached_sql_result["query_results"]
+            if query_results and len(query_results) > 0:
+                formatted_result = format_sql_results(
+                    [[v for v in row.values()] for row in query_results],
+                    list(query_results[0].keys())
+                )
+            else:
+                formatted_result = "No results found."
+
+            execution_time = (datetime.now() - start_time).total_seconds()
+            performance_metrics["response_times"].append(execution_time)
+
             return ChatResponse(
-                response="Service unavailable: LLM models are required for operation. Please ensure Ollama is running with phi3:mini model.",
+                response=formatted_result,
+                sql_query=cached_sql_result["sql_query"] if message.include_sql else None,
+                query_results=cached_sql_result["query_results"],
+                execution_time=execution_time,
+                routing_method="cache"
+            )
+
+        # Route the query using optimized routing
+        try:
+            route = await route_query_optimized(message.message)
+            logger.info(f"Query routed to: {route}")
+        except Exception as router_error:
+            logger.error(f"Router error: {str(router_error)}")
+            return ChatResponse(
+                response="Service temporarily unavailable. Please try again.",
                 sql_query=None,
                 error=str(router_error),
                 execution_time=(datetime.now() - start_time).total_seconds()
             )
 
         if route == "sql":
-            # Generate SQL using local Ollama models
+            # Generate SQL using async inference
             sql_model = message.sql_model or DEFAULT_SQL_MODEL
             include_sql = message.include_sql if message.include_sql is not None else (os.getenv("DEBUG") == "true")
 
             try:
-                sql_query = query_engine_instance.generate_sql(
+                sql_query = await query_engine_instance.generate_sql_async(
                     question=message.message,
                     model_name=sql_model,
                     system_prompt=message.system_prompt
                 )
 
-                logger.info(f"Generated SQL: {sql_query}")
-
-                # Validate SQL for safety and performance with row limit
+                # Validate SQL
                 row_limit = message.row_limit or 50
                 is_valid, validated_sql = query_engine_instance.validate_sql(sql_query, row_limit)
                 if not is_valid:
@@ -451,32 +498,29 @@ async def chat(message: ChatMessage):
                         execution_time=(datetime.now() - start_time).total_seconds()
                     )
 
-                logger.info(f"Validated SQL: {validated_sql}")
-
-                # Execute SQL with read-only approach
+                # Execute SQL
                 with query_engine_instance.engine.connect() as conn:
                     result = conn.execute(text(validated_sql))
                     rows = result.fetchall()
                     columns = list(result.keys())
 
-                # Return formatted text for display
                 formatted_result = format_sql_results(rows, columns)
-
-                # Convert rows to list of dicts for chart visualization
                 query_results = [dict(row._mapping) for row in rows] if rows else []
 
-                print(f"\n=== BACKEND CHART DEBUG ===")
-                print(f"Query results count: {len(query_results)}")
-                print(f"First row: {query_results[0] if query_results else 'None'}")
-                print(f"Sending query_results to frontend: {query_results is not None}")
-                print(f"========================\n")
+                # Cache the result
+                query_cache.cache_sql_query(message.message, validated_sql, query_results)
+
+                execution_time = (datetime.now() - start_time).total_seconds()
+                performance_metrics["response_times"].append(execution_time)
+                performance_metrics["response_times"] = performance_metrics["response_times"][-100:]  # Keep last 100
 
                 return ChatResponse(
                     response=formatted_result,
                     sql_query=validated_sql if include_sql else None,
                     query_results=query_results,
                     model_used=sql_model,
-                    execution_time=(datetime.now() - start_time).total_seconds()
+                    execution_time=execution_time,
+                    routing_method="heuristic" if performance_metrics["heuristic_hits"] > 0 else "llm"
                 )
 
             except Exception as sql_error:
@@ -488,17 +532,22 @@ async def chat(message: ChatMessage):
                     execution_time=(datetime.now() - start_time).total_seconds()
                 )
 
-        else:  # general chat
+        else:  # chat
             try:
-                chat_response = generate_chat_response(message.message)
+                chat_response = await generate_chat_response_async(message.message)
+
+                execution_time = (datetime.now() - start_time).total_seconds()
+                performance_metrics["response_times"].append(execution_time)
+
                 return ChatResponse(
                     response=chat_response,
-                    execution_time=(datetime.now() - start_time).total_seconds()
+                    execution_time=execution_time,
+                    routing_method="heuristic" if performance_metrics["heuristic_hits"] > 0 else "llm"
                 )
             except RuntimeError as chat_error:
                 logger.error(f"Chat response generation failed: {str(chat_error)}")
                 return ChatResponse(
-                    response="Service unavailable: LLM models are required for chat responses. Please ensure Ollama is running with phi3:mini model.",
+                    response="Service temporarily unavailable for chat. Please try again.",
                     sql_query=None,
                     error=str(chat_error),
                     execution_time=(datetime.now() - start_time).total_seconds()
@@ -507,11 +556,56 @@ async def chat(message: ChatMessage):
     except Exception as e:
         logger.error(f"Error processing chat request: {str(e)}")
         return ChatResponse(
-            response="An unexpected error occurred while processing your request. Please try again.",
+            response="An unexpected error occurred. Please try again.",
             sql_query=None,
             error=str(e),
             execution_time=(datetime.now() - start_time).total_seconds()
         )
+
+@app.get("/performance")
+async def get_performance_metrics():
+    """Get performance metrics for the optimized backend"""
+    cache_stats = query_cache.get_stats()
+    inference_cache_stats = inference_engine.get_cache_stats()
+
+    avg_response_time = sum(performance_metrics["response_times"]) / len(performance_metrics["response_times"]) if performance_metrics["response_times"] else 0
+
+    return {
+        "total_requests": performance_metrics["total_requests"],
+        "heuristic_routing": {
+            "hits": performance_metrics["heuristic_hits"],
+            "percentage": (performance_metrics["heuristic_hits"] / performance_metrics["total_requests"] * 100) if performance_metrics["total_requests"] > 0 else 0
+        },
+        "llm_fallbacks": {
+            "count": performance_metrics["llm_fallbacks"],
+            "percentage": (performance_metrics["llm_fallbacks"] / performance_metrics["total_requests"] * 100) if performance_metrics["total_requests"] > 0 else 0
+        },
+        "cache_stats": {
+            "query_cache": cache_stats,
+            "inference_cache": inference_cache_stats,
+            "total_cache_hits": performance_metrics["cache_hits"]
+        },
+        "response_times": {
+            "average_ms": avg_response_time * 1000,
+            "recent_count": len(performance_metrics["response_times"])
+        }
+    }
+
+@app.post("/performance/reset")
+async def reset_performance_metrics():
+    """Reset performance metrics"""
+    global performance_metrics
+    performance_metrics = {
+        "total_requests": 0,
+        "heuristic_hits": 0,
+        "llm_fallbacks": 0,
+        "cache_hits": 0,
+        "avg_response_time": 0.0,
+        "response_times": []
+    }
+    query_cache.reset_stats()
+    inference_engine.clear_cache()
+    return {"message": "Performance metrics reset successfully"}
 
 @app.get("/table-info")
 async def get_table_info():
@@ -540,85 +634,17 @@ async def get_table_info():
 @app.get("/models")
 async def get_available_models():
     """Get list of available SQL generation models"""
-    try:
-        # Check what models are actually available in Ollama
-        ollama_url = f"{os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')}/api/tags"
-        response = requests.get(ollama_url, timeout=5)
-        response.raise_for_status()
-
-        ollama_models = response.json()
-        available_models = [model["name"] for model in ollama_models.get("models", [])]
-
-        models_status = {}
-        for model_name in AVAILABLE_SQL_MODELS.keys():
-            models_status[model_name] = model_name in available_models
-
-        return {
-            "available_models": AVAILABLE_SQL_MODELS,
-            "default_model": DEFAULT_SQL_MODEL,
-            "intent_model": INTENT_MODEL,
-            "ollama_models": available_models,
-            "models_status": models_status,
-            "local_setup": True
-        }
-    except Exception as e:
-        logger.error(f"Failed to check Ollama models: {str(e)}")
-        return {
-            "available_models": AVAILABLE_SQL_MODELS,
-            "default_model": DEFAULT_SQL_MODEL,
-            "intent_model": INTENT_MODEL,
-            "error": f"Could not connect to Ollama: {str(e)}",
-            "local_setup": True
-        }
-
-@app.get("/health/models")
-async def check_model_health():
-    """Check health of local Ollama models and database"""
-    health_status = {
-        "ollama_service": "unhealthy",
-        "intent_model": "unhealthy",
-        "sql_models": "unhealthy",
-        "database": "unhealthy"
-    }
-
-    # Check Ollama service
-    try:
-        ollama_url = f"{os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')}/api/tags"
-        response = requests.get(ollama_url, timeout=5)
-        response.raise_for_status()
-
-        models_data = response.json()
-        available_models = [model["name"] for model in models_data.get("models", [])]
-        health_status["ollama_service"] = "healthy"
-
-        # Check specific models
-        health_status["intent_model"] = "healthy" if INTENT_MODEL in available_models else "missing"
-
-        sql_models_available = any(model in available_models for model in AVAILABLE_SQL_MODELS.keys())
-        health_status["sql_models"] = "healthy" if sql_models_available else "missing"
-
-    except Exception as e:
-        logger.error(f"Ollama service health check failed: {str(e)}")
-
-    # Check database
-    try:
-        with query_engine_instance.engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-            health_status["database"] = "healthy"
-    except Exception as e:
-        logger.error(f"Database health check failed: {str(e)}")
-
-    overall_healthy = all(status == "healthy" for status in health_status.values())
-
     return {
-        "status": "healthy" if overall_healthy else "degraded",
-        "components": health_status,
-        "setup": "local_ollama"
+        "available_models": AVAILABLE_SQL_MODELS,
+        "default_model": DEFAULT_SQL_MODEL,
+        "intent_model": INTENT_MODEL,
+        "local_setup": True,
+        "optimizations": ["heuristic_routing", "async_inference", "query_cache"]
     }
 
 @app.get("/system-prompts", response_model=SystemPromptsResponse)
 async def get_system_prompts():
-    """Get current and default system prompts for both models"""
+    """Get current and default system prompts"""
     return SystemPromptsResponse(
         intent_prompt=current_intent_prompt,
         sql_prompt=current_sql_prompt,

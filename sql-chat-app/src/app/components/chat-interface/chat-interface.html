@@ -386,8 +386,10 @@
             </div>
           </div>
           <div class="message-content">
-            <pre *ngIf="message.type === 'ai'" class="message-text sql-response">{{ message.content }}</pre>
+            <!-- User messages -->
             <div *ngIf="message.type === 'user'" class="message-text">{{ message.content }}</div>
+
+            <!-- Thinking indicator -->
             <div *ngIf="message.type === 'thinking'" class="message-text thinking-text">
               {{ message.content }}
               <div class="thinking-dots">
@@ -396,6 +398,43 @@
                 <div class="dot"></div>
               </div>
             </div>
+
+            <!-- AI messages with table rendering -->
+            <div *ngIf="message.type === 'ai'" class="ai-response-container">
+              <!-- Table view for structured data -->
+              <div *ngIf="message.queryResults && message.queryResults.length > 0 && !message.error"
+                   class="data-table-container">
+                <div class="table-wrapper">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th *ngFor="let col of getTableColumns(message.queryResults)">{{ col }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr *ngFor="let row of message.queryResults; let i = index">
+                        <td *ngFor="let col of getTableColumns(message.queryResults)">
+                          {{ formatCellValue(row[col]) }}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="table-info">
+                  Showing {{ message.queryResults.length }} row{{ message.queryResults.length !== 1 ? 's' : '' }}
+                </div>
+              </div>
+
+              <!-- Fallback to text response if no query results -->
+              <pre *ngIf="!message.queryResults || message.queryResults.length === 0 || message.error"
+                   class="message-text sql-response">{{ message.content }}</pre>
+            </div>
+
+            <!-- Chart Visualization -->
+            <app-chart-visualization
+              *ngIf="message.showChart && message.chartData"
+              [chartData]="message.chartData">
+            </app-chart-visualization>
           </div>
           <div class="message-footer">
             <div class="message-timestamp">

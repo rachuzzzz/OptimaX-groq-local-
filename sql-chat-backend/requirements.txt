@@ -9,3 +9,4 @@ python-dotenv==1.0.0
 pydantic==2.8.0
 sqlparse==0.4.4
 requests==2.31.0
+aiohttp==3.9.1

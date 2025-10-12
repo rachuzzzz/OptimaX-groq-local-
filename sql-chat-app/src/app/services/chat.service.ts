@@ -12,6 +12,7 @@ export interface ChatResponse {
   response: string;
   sql_query?: string;
   error?: string;
+  query_results?: any[];
 }
 
 export interface TableInfo {

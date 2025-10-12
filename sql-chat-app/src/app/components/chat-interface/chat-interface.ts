@@ -4,6 +4,8 @@ import { FormsModule } from '@angular/forms';
 import { trigger, state, style, transition, animate } from '@angular/animations';
 import { ChatService, ChatResponse } from '../../services/chat.service';
 import { SystemPromptManagerComponent } from '../system-prompt-manager/system-prompt-manager';
+import { ChartVisualizationComponent, ChartData } from '../chart-visualization/chart-visualization';
+import { ChartDetectionService } from '../../services/chart-detection.service';
 
 interface Message {
   type: 'user' | 'ai' | 'thinking';
@@ -12,6 +14,9 @@ interface Message {
   sqlQuery?: string;
   responseTime?: number;
   error?: boolean;
+  chartData?: ChartData;
+  showChart?: boolean;
+  queryResults?: any[];
 }
 
 interface DebugLog {
@@ -39,7 +44,7 @@ interface SQLQueryEntry {
 @Component({
   selector: 'app-chat-interface',
   standalone: true,
-  imports: [CommonModule, FormsModule, SystemPromptManagerComponent],
+  imports: [CommonModule, FormsModule, SystemPromptManagerComponent, ChartVisualizationComponent],
   templateUrl: './chat-interface.html',
   styleUrl: './chat-interface.scss',
   animations: [
@@ -226,7 +231,10 @@ Example patterns:
     'Which weather conditions cause the most accidents?'
   ];
 
-  constructor(private chatService: ChatService) {
+  constructor(
+    private chatService: ChatService,
+    private chartDetectionService: ChartDetectionService
+  ) {
     this.loadFromStorage();
     this.setGreeting();
   }
@@ -347,13 +355,54 @@ Example patterns:
           // Remove thinking indicator
           this.messages = this.messages.filter(msg => msg.type !== 'thinking');
 
+          // Detect if results should be visualized
+          let chartData: ChartData | undefined;
+          let showChart = false;
+
+          console.log('=== CHART DETECTION DEBUG ===');
+          console.log('Has sql_query:', !!response.sql_query);
+          console.log('Has query_results:', !!response.query_results);
+          console.log('Query results length:', response.query_results?.length);
+          console.log('Query results:', response.query_results);
+
+          if (response.sql_query && response.query_results && response.query_results.length > 0) {
+            const shouldViz = this.chartDetectionService.shouldVisualize(
+              response.sql_query,
+              response.query_results
+            );
+
+            console.log('Should visualize:', shouldViz);
+
+            if (shouldViz) {
+              const chartType = this.chartDetectionService.detectChartType(
+                response.sql_query,
+                response.query_results
+              );
+              console.log('Chart type detected:', chartType);
+
+              chartData = this.chartDetectionService.parseToChartData(
+                response.query_results,
+                chartType
+              );
+              console.log('Chart data:', chartData);
+
+              showChart = true;
+              this.addDebugLog('info', `Chart detected: ${chartType} with ${response.query_results.length} data points`);
+            }
+          } else {
+            console.log('Chart detection skipped - missing data');
+          }
+
           this.messages.push({
             type: 'ai',
             content: response.response,
             timestamp: new Date(),
             sqlQuery: response.sql_query,
             responseTime: responseTime,
-            error: !!response.error
+            error: !!response.error,
+            chartData: chartData,
+            showChart: showChart,
+            queryResults: response.query_results
           });
 
           this.addDebugLog('info', `Query completed in ${responseTime}ms`);
@@ -589,5 +638,28 @@ Example patterns:
     } else {
       this.greeting = 'Good Night';
     }
+  }
+
+  // Table rendering helper functions
+  getTableColumns(results: any[]): string[] {
+    if (!results || results.length === 0) return [];
+    return Object.keys(results[0]);
+  }
+
+  formatCellValue(value: any): string {
+    if (value === null || value === undefined) {
+      return 'NULL';
+    }
+    if (typeof value === 'number') {
+      // Format large numbers with commas
+      if (value > 1000 || value < -1000) {
+        return value.toLocaleString();
+      }
+      return value.toString();
+    }
+    if (typeof value === 'boolean') {
+      return value ? 'true' : 'false';
+    }
+    return String(value);
   }
 }

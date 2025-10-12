@@ -1,0 +1,69 @@
+<div class="chart-visualization-container" *ngIf="chartData">
+  <div class="chart-header">
+    <div class="chart-title">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="18" y1="20" x2="18" y2="10"/>
+        <line x1="12" y1="20" x2="12" y2="4"/>
+        <line x1="6" y1="20" x2="6" y2="14"/>
+      </svg>
+      <span>Data Visualization</span>
+    </div>
+
+    <div class="chart-controls">
+      <button class="chart-type-btn"
+              [class.active]="currentType === 'bar'"
+              (click)="changeChartType('bar')"
+              title="Bar Chart">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="18" y1="20" x2="18" y2="10"/>
+          <line x1="12" y1="20" x2="12" y2="4"/>
+          <line x1="6" y1="20" x2="6" y2="14"/>
+        </svg>
+      </button>
+
+      <button class="chart-type-btn"
+              [class.active]="currentType === 'line'"
+              (click)="changeChartType('line')"
+              title="Line Chart">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        </svg>
+      </button>
+
+      <button class="chart-type-btn"
+              [class.active]="currentType === 'pie'"
+              (click)="changeChartType('pie')"
+              title="Pie Chart">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21.21 15.89A10 10 0 1 1 8 2.83"/>
+          <path d="M22 12A10 10 0 0 0 12 2v10z"/>
+        </svg>
+      </button>
+
+      <button class="chart-type-btn"
+              [class.active]="currentType === 'doughnut'"
+              (click)="changeChartType('doughnut')"
+              title="Doughnut Chart">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/>
+          <circle cx="12" cy="12" r="4"/>
+        </svg>
+      </button>
+
+      <div class="divider"></div>
+
+      <button class="download-btn" (click)="downloadChart()" title="Download Chart">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        <span>Download</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="chart-canvas-container">
+    <canvas #chartCanvas></canvas>
+  </div>
+</div>

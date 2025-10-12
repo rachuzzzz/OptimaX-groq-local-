@@ -1,0 +1,192 @@
+.chart-visualization-container {
+  background: rgba(30, 30, 35, 0.6);
+  backdrop-filter: blur(32px) saturate(180%);
+  -webkit-backdrop-filter: blur(32px) saturate(180%);
+  border: 1px solid rgba(212, 175, 55, 0.3);
+  border-radius: 16px;
+  padding: 20px;
+  margin-top: 16px;
+  animation: slideInUp 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  box-shadow:
+    0 8px 32px rgba(212, 175, 55, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  position: relative;
+  overflow: hidden;
+
+  &::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 50%;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, transparent 100%);
+    pointer-events: none;
+  }
+
+  .chart-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid rgba(212, 175, 55, 0.15);
+
+    .chart-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+
+      svg {
+        color: #ffd700;
+        width: 18px;
+        height: 18px;
+      }
+
+      span {
+        color: #e5e7eb;
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: -0.3px;
+      }
+    }
+
+    .chart-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+
+      .chart-type-btn {
+        background: rgba(30, 30, 35, 0.6);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(107, 114, 128, 0.3);
+        border-radius: 8px;
+        color: #9ca3af;
+        cursor: pointer;
+        padding: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        position: relative;
+        overflow: hidden;
+
+        &::before {
+          content: '';
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          width: 0;
+          height: 0;
+          border-radius: 50%;
+          background: rgba(255, 215, 0, 0.2);
+          transform: translate(-50%, -50%);
+          transition: width 0.4s, height 0.4s;
+        }
+
+        &:hover {
+          border-color: rgba(212, 175, 55, 0.5);
+          background: rgba(212, 175, 55, 0.1);
+          color: #ffd700;
+          transform: translateY(-2px);
+
+          svg {
+            transform: scale(1.1);
+          }
+        }
+
+        &.active {
+          background: linear-gradient(135deg, rgba(212, 175, 55, 0.25), rgba(212, 175, 55, 0.15));
+          border-color: rgba(212, 175, 55, 0.6);
+          color: #ffd700;
+          box-shadow: 0 4px 12px rgba(212, 175, 55, 0.2);
+
+          svg {
+            filter: drop-shadow(0 0 4px rgba(255, 215, 0, 0.6));
+          }
+        }
+
+        &:active {
+          transform: translateY(0) scale(0.95);
+
+          &::before {
+            width: 100px;
+            height: 100px;
+          }
+        }
+
+        svg {
+          width: 14px;
+          height: 14px;
+          transition: all 0.3s ease;
+        }
+      }
+
+      .divider {
+        width: 1px;
+        height: 20px;
+        background: rgba(107, 114, 128, 0.3);
+        margin: 0 4px;
+      }
+
+      .download-btn {
+        background: linear-gradient(135deg, rgba(212, 175, 55, 0.15), rgba(212, 175, 55, 0.08));
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(212, 175, 55, 0.3);
+        border-radius: 8px;
+        color: #ffd700;
+        cursor: pointer;
+        padding: 8px 12px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        font-weight: 500;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+
+        &:hover {
+          background: linear-gradient(135deg, rgba(212, 175, 55, 0.25), rgba(212, 175, 55, 0.15));
+          border-color: rgba(212, 175, 55, 0.6);
+          box-shadow: 0 4px 16px rgba(212, 175, 55, 0.3);
+          transform: translateY(-2px);
+
+          svg {
+            transform: translateY(2px);
+          }
+        }
+
+        &:active {
+          transform: translateY(0) scale(0.95);
+        }
+
+        svg {
+          width: 14px;
+          height: 14px;
+          transition: transform 0.3s ease;
+        }
+      }
+    }
+  }
+
+  .chart-canvas-container {
+    position: relative;
+    height: 350px;
+    width: 100%;
+
+    canvas {
+      max-height: 100%;
+      width: 100%;
+    }
+  }
+}
+
+@keyframes slideInUp {
+  0% {
+    opacity: 0;
+    transform: translateY(20px) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}

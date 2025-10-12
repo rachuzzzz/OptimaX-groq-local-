@@ -334,7 +334,6 @@
         color: #9ca3af;
         font-size: 13px;
         font-weight: 500;
-        flex: 1;
         transition: all 0.35s ease;
 
         &.truncated-query {
@@ -2316,5 +2315,117 @@
   }
   to {
     opacity: 1;
+  }
+}
+
+// Data Table Styles
+.ai-response-container {
+  width: 100%;
+}
+
+.data-table-container {
+  margin: 1rem 0;
+  background: rgba(18, 18, 20, 0.5);
+  backdrop-filter: blur(10px);
+  border-radius: 12px;
+  border: 1px solid rgba(212, 175, 55, 0.15);
+  overflow: hidden;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+
+  .table-wrapper {
+    overflow-x: auto;
+    overflow-y: auto;
+    max-height: 500px;
+
+    &::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    &::-webkit-scrollbar-track {
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background: rgba(212, 175, 55, 0.3);
+      border-radius: 4px;
+
+      &:hover {
+        background: rgba(212, 175, 55, 0.5);
+      }
+    }
+  }
+
+  .data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    font-family: 'Monaco', 'Consolas', monospace;
+
+    thead {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: linear-gradient(180deg, rgba(212, 175, 55, 0.2) 0%, rgba(212, 175, 55, 0.15) 100%);
+      backdrop-filter: blur(10px);
+
+      tr {
+        th {
+          padding: 1rem;
+          text-align: left;
+          font-weight: 600;
+          color: #ffd700;
+          border-bottom: 2px solid rgba(212, 175, 55, 0.3);
+          text-transform: uppercase;
+          font-size: 0.75rem;
+          letter-spacing: 0.5px;
+          white-space: nowrap;
+        }
+      }
+    }
+
+    tbody {
+      tr {
+        transition: all 0.2s ease;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+
+        &:nth-child(even) {
+          background: rgba(255, 255, 255, 0.02);
+        }
+
+        &:hover {
+          background: rgba(212, 175, 55, 0.08);
+          transform: translateX(2px);
+        }
+
+        td {
+          padding: 0.875rem 1rem;
+          color: #e0e0e0;
+          border-right: 1px solid rgba(255, 255, 255, 0.03);
+          white-space: nowrap;
+
+          &:last-child {
+            border-right: none;
+          }
+        }
+      }
+    }
+  }
+
+  .table-info {
+    padding: 0.75rem 1rem;
+    background: rgba(212, 175, 55, 0.05);
+    border-top: 1px solid rgba(212, 175, 55, 0.15);
+    color: #d4af37;
+    font-size: 0.85rem;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+
+    &::before {
+      content: '📊';
+      font-size: 1rem;
+    }
   }
 }
