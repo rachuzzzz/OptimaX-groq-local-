@@ -1,7 +1,6 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, Output, EventEmitter } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { ChatService, SystemPromptsResponse } from '../../services/chat.service';
 
 @Component({
   selector: 'app-system-prompt-manager',
@@ -10,204 +9,198 @@ import { ChatService, SystemPromptsResponse } from '../../services/chat.service'
   template: `
     <div class="system-prompt-manager">
       <div class="manager-header">
-        <h2>System Prompts</h2>
-        <p>Configure your AI models</p>
+        <h2>System Prompt Editor</h2>
+        <p>Configure OptimaX v4.0 - Single Groq LLM (llama-3.3-70b-versatile)</p>
+        <div class="architecture-info">
+          <span class="badge">✨ Unified Architecture</span>
+          <span class="badge">⚡ Fast Response</span>
+          <span class="badge">🎯 Single LLM</span>
+        </div>
       </div>
-
-      <div *ngIf="isLoading" class="loading">Loading...</div>
 
       <div *ngIf="message" class="message" [ngClass]="'message-' + messageType">
         {{ message }}
       </div>
 
-      <div *ngIf="!isLoading" class="tabs">
-        <button class="tab" [class.active]="activeTab === 'sql'" (click)="activeTab = 'sql'">
-          SQL Generator
-          <span class="modified" *ngIf="isDifferentFromDefault('sql')">●</span>
-        </button>
-        <button class="tab" [class.active]="activeTab === 'intent'" (click)="activeTab = 'intent'">
-          Intent Classifier
-          <span class="modified" *ngIf="isDifferentFromDefault('intent')">●</span>
-        </button>
-      </div>
+      <div class="editor">
+        <div class="editor-header">
+          <h3>Master System Prompt</h3>
+          <div class="stats">
+            <span>{{ promptStats.characters }} chars</span>
+            <span>{{ promptStats.words }} words</span>
+            <span>{{ promptStats.lines }} lines</span>
+          </div>
+        </div>
+        <p class="description">
+          Controls how Groq's llama-3.3-70b handles ALL tasks: greetings, SQL generation, data analysis, and chart recommendations.
+        </p>
 
-      <div *ngIf="activeTab === 'sql'" class="editor">
-        <h3>SQL Generation</h3>
-        <p>Controls how CodeLlama generates PostgreSQL queries</p>
-        <textarea class="prompt-input" [(ngModel)]="sqlPrompt" (ngModelChange)="onPromptChange()" placeholder="Loading current SQL prompt..."></textarea>
+        <div class="warning-box" *ngIf="isDifferentFromDefault()">
+          ⚠️ Custom prompt active - Using modified system prompt
+        </div>
+
+        <textarea
+          class="prompt-input"
+          [(ngModel)]="systemPrompt"
+          (ngModelChange)="onPromptChange()"
+          placeholder="Loading current system prompt..."
+          spellcheck="false">
+        </textarea>
+
+        <div class="prompt-guidelines">
+          <details>
+            <summary>💡 Prompt Guidelines</summary>
+            <ul>
+              <li>Keep greeting detection rules clear (fast-path optimization)</li>
+              <li>Define database columns and table schema</li>
+              <li>Include few-shot examples for SQL generation</li>
+              <li>Specify response format and tone</li>
+              <li>Add safety rules (no DROP, DELETE, UPDATE)</li>
+            </ul>
+          </details>
+        </div>
+
         <div class="actions">
-          <button class="btn primary" (click)="savePrompt('sql')" [disabled]="saveInProgress">
-            {{ saveInProgress ? 'Saving...' : 'Save Changes' }}
+          <button class="btn primary" (click)="savePrompt()" [disabled]="saveInProgress || !hasChanges()">
+            {{ saveInProgress ? 'Saving...' : 'Apply Custom Prompt' }}
           </button>
-          <button class="btn secondary" (click)="testPrompt('sql')">Test Prompt</button>
-          <button class="btn secondary" (click)="resetPrompt('sql')">Reset to Default</button>
+          <button class="btn secondary" (click)="testPrompt()">Test Prompt</button>
+          <button class="btn secondary" (click)="resetPrompt()" [disabled]="!isDifferentFromDefault()">
+            Reset to Default
+          </button>
+          <button class="btn secondary" (click)="exportPrompt()">Export</button>
         </div>
       </div>
 
-      <div *ngIf="activeTab === 'intent'" class="editor">
-        <h3>Intent Classification</h3>
-        <p>Controls how Phi-3 Mini classifies user messages</p>
-        <textarea class="prompt-input" [(ngModel)]="intentPrompt" (ngModelChange)="onPromptChange()" placeholder="Loading current intent prompt..."></textarea>
-        <div class="actions">
-          <button class="btn primary" (click)="savePrompt('intent')" [disabled]="saveInProgress">
-            {{ saveInProgress ? 'Saving...' : 'Save Changes' }}
-          </button>
-          <button class="btn secondary" (click)="testPrompt('intent')">Test Prompt</button>
-          <button class="btn secondary" (click)="resetPrompt('intent')">Reset to Default</button>
-        </div>
+      <div class="info-panel">
+        <h4>ℹ️ About v4.0 Architecture</h4>
+        <p>OptimaX v4.0 uses a <strong>single LLM</strong> (Groq llama-3.3-70b-versatile) for all operations:</p>
+        <ul>
+          <li><strong>Greeting detection</strong> - Fast-path bypass (&lt;50ms)</li>
+          <li><strong>SQL generation</strong> - Direct query creation</li>
+          <li><strong>Data analysis</strong> - Result interpretation</li>
+          <li><strong>Chart recommendations</strong> - Automatic visualization</li>
+        </ul>
+        <p class="note">
+          <strong>Note:</strong> Changes are session-based and reset on page refresh.
+          Export your prompt to save it permanently.
+        </p>
       </div>
     </div>
   `,
   styleUrl: './system-prompt-manager.scss'
 })
 export class SystemPromptManagerComponent implements OnInit {
-  // Current prompts
-  intentPrompt: string = '';
-  sqlPrompt: string = '';
+  @Output() promptChanged = new EventEmitter<string>();
 
-  // Default prompts for comparison
-  defaultIntentPrompt: string = '';
-  defaultSqlPrompt: string = '';
+  // Current prompt
+  systemPrompt: string = '';
+
+  // Default prompt for v4.0
+  defaultSystemPrompt: string = `YOU ARE **OPTIMAX**, AN EXPERT AI ASSISTANT FOR ANALYZING UNITED STATES TRAFFIC ACCIDENT DATA (2016–2023). YOU HAVE READ-ONLY ACCESS TO A POSTGRESQL DATABASE WITH 7.7 MILLION RECORDS IN THE TABLE \`us_accidents\`.
+
+YOUR PURPOSE IS TO **GENERATE SQL QUERIES**, **INTERPRET RESULTS**, AND **EXPLAIN INSIGHTS** CLEARLY AND CONCISELY.
+
+---
+
+### CAPABILITIES
+1. **GENERATE ONE SQL QUERY** per user question — read-only, aggregate (COUNT, AVG, SUM, GROUP BY).
+2. **INTERPRET RESULTS** in conversational English with context and significance.
+3. **RECOMMEND CHART TYPES** when the user asks to "visualize", "plot", or "show as chart".
+
+---
+
+### INTENT CLASSIFICATION (STRICT)
+1. **GREETING / CASUAL INTENT (NO TOOL USE)**
+   - Triggered by short or social phrases such as:
+     - "hi", "hello", "hey", "yo", "thanks", "thank you", "who are you", "help", "what can you do"
+   - → IMMEDIATELY RESPOND FRIENDLY AND INFORMATIVE.
+   - → DO NOT CALL OR EXECUTE ANY TOOL OR SQL QUERY.
+   - 🔒 STRICT RULE: If user input is fewer than 6 words and matches greeting/casual intent → **NEVER EXECUTE ANY TOOL.**
+
+2. **DATA QUESTION**
+   - Phrases include: "show me", "how many", "list", "top", "compare", "count", "average", "trend"
+   - → FORMULATE **ONE** SQL query (read-only, aggregate only).
+   - → EXECUTE ONCE, THEN SUMMARIZE INSIGHTS CLEARLY.
+
+---
+
+### DATABASE COLUMNS
+- Geographic: \`state\`, \`city\`, \`county\`, \`latitude\`, \`longitude\`
+- Severity: \`severity\` (1–4, where 4 = most severe)
+- Weather: \`weather_condition\`, \`temperature_f\`, \`visibility_mi\`, \`precipitation_in\`, \`humidity\`, \`wind_speed_mph\`
+- Time: \`start_time\`, \`end_time\`, \`year\`, \`month\`, \`day\`, \`hour\`, \`day_of_week\`, \`is_weekend\`
+- Road: \`street\`, \`junction\`, \`traffic_signal\`, \`crossing\`, \`railway\`, \`stop\`
+
+---
+
+### RESPONSE STYLE
+- FRIENDLY + INFORMATIVE tone.
+- PROVIDE CONTEXT ("California = 1.74 M accidents ≈ 22% of total").
+- SUMMARIZE key insight + optional next step.
+
+### WHAT NOT TO DO
+- **DO NOT** execute tools during greetings.
+- **DO NOT** run multiple SQLs for one query.
+- **DO NOT** output > 50 rows.
+- **DO NOT** skip ordering (use DESC for top values).`;
 
   // UI state
-  activeTab: 'intent' | 'sql' = 'sql';
   isLoading: boolean = false;
-  showDiff: boolean = false;
   saveInProgress: boolean = false;
 
   // Validation and stats
-  promptStats = {
-    intent: { characters: 0, words: 0, lines: 0 },
-    sql: { characters: 0, words: 0, lines: 0 }
-  };
+  promptStats = { characters: 0, words: 0, lines: 0 };
 
   // Success/Error messages
   message: string = '';
   messageType: 'success' | 'error' | 'info' = 'info';
 
-  constructor(private chatService: ChatService) {}
+  constructor() {}
 
   ngOnInit(): void {
-    this.loadSystemPrompts();
+    this.loadSystemPrompt();
   }
 
-  loadSystemPrompts(): void {
-    this.isLoading = true;
-    this.chatService.getSystemPrompts().subscribe({
-      next: (response: SystemPromptsResponse) => {
-        this.intentPrompt = response.intent_prompt;
-        this.sqlPrompt = response.sql_prompt;
-        this.defaultIntentPrompt = response.default_intent_prompt;
-        this.defaultSqlPrompt = response.default_sql_prompt;
-        this.updateStats();
-        this.isLoading = false;
-        this.showMessage('System prompts loaded successfully', 'success');
-      },
-      error: (error) => {
-        console.error('Failed to load system prompts:', error);
-        this.showMessage('Failed to load system prompts', 'error');
-        this.isLoading = false;
-      }
-    });
+  loadSystemPrompt(): void {
+    // Load from localStorage or use default
+    const savedPrompt = localStorage.getItem('optimax-system-prompt');
+    this.systemPrompt = savedPrompt || this.defaultSystemPrompt;
+    this.updateStats();
+    this.showMessage('System prompt loaded', 'success');
   }
 
-  savePrompt(modelType: 'intent' | 'sql'): void {
-    const prompt = modelType === 'intent' ? this.intentPrompt : this.sqlPrompt;
-
-    if (!prompt.trim()) {
+  savePrompt(): void {
+    if (!this.systemPrompt.trim()) {
       this.showMessage('Prompt cannot be empty', 'error');
       return;
     }
 
-    this.saveInProgress = true;
-    this.chatService.updateSystemPrompt({ model_type: modelType, prompt }).subscribe({
-      next: (response) => {
-        this.showMessage(`${modelType.charAt(0).toUpperCase() + modelType.slice(1)} prompt saved successfully`, 'success');
-        this.saveInProgress = false;
-      },
-      error: (error) => {
-        console.error('Failed to save prompt:', error);
-        this.showMessage('Failed to save prompt', 'error');
-        this.saveInProgress = false;
-      }
-    });
+    // Save to localStorage (session-based in v4.0)
+    localStorage.setItem('optimax-system-prompt', this.systemPrompt);
+    this.showMessage('✅ Custom prompt saved! Refresh page or create new session to apply.', 'success');
+
+    // Emit to parent component
+    this.promptChanged.emit(this.systemPrompt);
   }
 
-  resetPrompt(modelType: 'intent' | 'sql'): void {
-    const promptName = modelType === 'intent' ? 'Intent Classifier' : 'SQL Generator';
-
-    if (confirm(`Are you sure you want to reset the ${promptName} prompt to default?\n\nThis will restore the original system prompt and cannot be undone.`)) {
-      this.showMessage(`Resetting ${promptName} prompt to default...`, 'info');
-
-      this.chatService.resetSystemPrompt(modelType).subscribe({
-        next: (response) => {
-          // Update the local prompt with the default value
-          if (modelType === 'intent') {
-            this.intentPrompt = this.defaultIntentPrompt;
-          } else {
-            this.sqlPrompt = this.defaultSqlPrompt;
-          }
-          this.updateStats();
-          this.showMessage(`${promptName} prompt successfully reset to default`, 'success');
-        },
-        error: (error) => {
-          console.error('Failed to reset prompt:', error);
-          this.showMessage(`Failed to reset ${promptName} prompt. Please try again.`, 'error');
-        }
-      });
+  resetPrompt(): void {
+    if (confirm('Reset to default OptimaX v4.0 system prompt?\n\nThis will restore the original prompt designed for optimal performance.')) {
+      this.systemPrompt = this.defaultSystemPrompt;
+      localStorage.removeItem('optimax-system-prompt');
+      this.updateStats();
+      this.showMessage('✅ Reset to default prompt. Refresh page or create new session to apply.', 'success');
+      this.promptChanged.emit(this.systemPrompt);
     }
   }
 
-  resetAllPrompts(): void {
-    if (confirm('Are you sure you want to reset ALL prompts to defaults?')) {
-      this.chatService.resetAllSystemPrompts().subscribe({
-        next: (response) => {
-          this.intentPrompt = this.defaultIntentPrompt;
-          this.sqlPrompt = this.defaultSqlPrompt;
-          this.updateStats();
-          this.showMessage('All prompts reset to defaults', 'success');
-        },
-        error: (error) => {
-          console.error('Failed to reset prompts:', error);
-          this.showMessage('Failed to reset prompts', 'error');
-        }
-      });
-    }
-  }
-
-  validatePrompt(modelType: 'intent' | 'sql'): string[] {
-    const prompt = modelType === 'intent' ? this.intentPrompt : this.sqlPrompt;
-    const warnings: string[] = [];
-
-    if (prompt.length < 50) {
-      warnings.push('Prompt might be too short');
-    }
-
-    if (prompt.length > 3000) {
-      warnings.push('Prompt might be too long');
-    }
-
-    if (modelType === 'sql') {
-      if (!prompt.includes('{schema_text}')) {
-        warnings.push('SQL prompt should include {schema_text} placeholder');
-      }
-      if (!prompt.includes('{question}')) {
-        warnings.push('SQL prompt should include {question} placeholder');
-      }
-    }
-
-    if (modelType === 'intent') {
-      if (!prompt.toLowerCase().includes('sql_intent') || !prompt.toLowerCase().includes('chat_intent')) {
-        warnings.push('Intent prompt should mention SQL_INTENT and CHAT_INTENT');
-      }
-    }
-
-    return warnings;
+  hasChanges(): boolean {
+    const savedPrompt = localStorage.getItem('optimax-system-prompt');
+    return this.systemPrompt !== (savedPrompt || this.defaultSystemPrompt);
   }
 
   updateStats(): void {
-    this.promptStats.intent = this.calculateStats(this.intentPrompt);
-    this.promptStats.sql = this.calculateStats(this.sqlPrompt);
+    this.promptStats = this.calculateStats(this.systemPrompt);
   }
 
   private calculateStats(text: string) {
@@ -222,10 +215,11 @@ export class SystemPromptManagerComponent implements OnInit {
     this.updateStats();
   }
 
-  exportPrompts(): void {
+  exportPrompt(): void {
     const data = {
-      intent_prompt: this.intentPrompt,
-      sql_prompt: this.sqlPrompt,
+      system_prompt: this.systemPrompt,
+      version: '4.0',
+      architecture: 'Single Groq LLM (llama-3.3-70b-versatile)',
       exported_at: new Date().toISOString()
     };
 
@@ -233,50 +227,27 @@ export class SystemPromptManagerComponent implements OnInit {
     const dataBlob = new Blob([dataStr], {type: 'application/json'});
     const link = document.createElement('a');
     link.href = URL.createObjectURL(dataBlob);
-    link.download = `optimax-prompts-${new Date().toISOString().split('T')[0]}.json`;
+    link.download = `optimax-v4-prompt-${new Date().toISOString().split('T')[0]}.json`;
     link.click();
+    this.showMessage('Prompt exported successfully', 'success');
   }
 
-  importPrompts(event: any): void {
-    const file = event.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        try {
-          const data = JSON.parse(e.target?.result as string);
-          if (data.intent_prompt) this.intentPrompt = data.intent_prompt;
-          if (data.sql_prompt) this.sqlPrompt = data.sql_prompt;
-          this.updateStats();
-          this.showMessage('Prompts imported successfully', 'success');
-        } catch (error) {
-          this.showMessage('Failed to import prompts: Invalid file format', 'error');
-        }
-      };
-      reader.readAsText(file);
-    }
-  }
+  testPrompt(): void {
+    const testMessage = 'Top 10 states by accident count';
 
-  testPrompt(modelType: 'intent' | 'sql'): void {
-    const testMessages = {
-      intent: 'Test message: Show me accidents in Texas',
-      sql: 'Test query: What are the top 5 states with most accidents?'
-    };
+    this.showMessage('Testing prompt with sample query...', 'info');
 
-    this.showMessage(`Testing ${modelType} prompt...`, 'info');
+    // Save the current prompt first
+    this.savePrompt();
 
-    // Save the current prompt first, then trigger a test
-    this.savePrompt(modelType);
-
-    // Close the modal and set the test message in the main chat
+    // Close the modal and trigger test in main chat
     setTimeout(() => {
       this.closeModal();
-      // Emit an event or use a service to communicate with the parent component
-      this.triggerTestInMainChat(testMessages[modelType]);
+      this.triggerTestInMainChat(testMessage);
     }, 1000);
   }
 
   private triggerTestInMainChat(testMessage: string): void {
-    // We'll emit this to the parent component
     const event = new CustomEvent('testPrompt', {
       detail: { message: testMessage },
       bubbles: true
@@ -285,17 +256,12 @@ export class SystemPromptManagerComponent implements OnInit {
   }
 
   private closeModal(): void {
-    // Close the system prompt manager
     const event = new CustomEvent('closeSystemPromptManager', { bubbles: true });
     document.dispatchEvent(event);
   }
 
-  isDifferentFromDefault(modelType: 'intent' | 'sql'): boolean {
-    if (modelType === 'intent') {
-      return this.intentPrompt !== this.defaultIntentPrompt;
-    } else {
-      return this.sqlPrompt !== this.defaultSqlPrompt;
-    }
+  isDifferentFromDefault(): boolean {
+    return this.systemPrompt !== this.defaultSystemPrompt;
   }
 
   private showMessage(text: string, type: 'success' | 'error' | 'info'): void {
@@ -306,18 +272,9 @@ export class SystemPromptManagerComponent implements OnInit {
     }, 5000);
   }
 
-  copyToClipboard(text: string): void {
-    navigator.clipboard.writeText(text).then(() => {
-      this.showMessage('Copied to clipboard', 'success');
+  copyToClipboard(): void {
+    navigator.clipboard.writeText(this.systemPrompt).then(() => {
+      this.showMessage('Prompt copied to clipboard', 'success');
     });
-  }
-
-  formatPrompt(modelType: 'intent' | 'sql'): void {
-    if (modelType === 'intent') {
-      this.intentPrompt = this.intentPrompt.trim();
-    } else {
-      this.sqlPrompt = this.sqlPrompt.trim();
-    }
-    this.updateStats();
   }
 }

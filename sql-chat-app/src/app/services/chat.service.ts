@@ -69,24 +69,11 @@ export interface TableInfo {
   total_records: number;
 }
 
-export interface SystemPromptsResponse {
-  intent_prompt: string;
-  sql_prompt: string;
-  default_intent_prompt: string;
-  default_sql_prompt: string;
-}
-
-export interface SystemPromptUpdate {
-  model_type: 'intent' | 'sql';
-  prompt: string;
-}
-
 @Injectable({
   providedIn: 'root'
 })
 export class ChatService {
-  // Use v4.0 backend by default (port 8000)
-  // Keeping agenticMode flag for compatibility but always using v4.0
+  // v4.0 backend (port 8000) - Single Groq LLM architecture
   private agenticMode = true;
 
   private get baseUrl(): string {
@@ -95,10 +82,10 @@ export class ChatService {
 
   constructor(private http: HttpClient) {}
 
-  // Toggle between agentic and optimized backends
+  // Toggle between agentic and optimized backends (kept for compatibility)
   setAgenticMode(enabled: boolean): void {
     this.agenticMode = enabled;
-    console.log(`Switched to ${enabled ? 'agentic' : 'optimized'} backend (${this.baseUrl})`);
+    console.log(`Mode: ${enabled ? 'agentic' : 'optimized'} (${this.baseUrl})`);
   }
 
   isAgenticMode(): boolean {
@@ -121,7 +108,7 @@ export class ChatService {
     return this.http.get(`${this.baseUrl}/health`);
   }
 
-  // Session Management (Agentic mode only)
+  // Session Management
   getSession(sessionId: string): Observable<SessionInfo> {
     return this.http.get<SessionInfo>(`${this.baseUrl}/sessions/${sessionId}`);
   }
@@ -139,29 +126,8 @@ export class ChatService {
     return this.http.get(`${this.baseUrl}/performance`);
   }
 
-  // Agent info (Agentic mode only)
+  // Agent info
   getAgentInfo(): Observable<any> {
     return this.http.get(`${this.baseUrl}/agent/info`);
-  }
-
-  // System Prompt Management Methods
-  getSystemPrompts(): Observable<SystemPromptsResponse> {
-    return this.http.get<SystemPromptsResponse>(`${this.baseUrl}/system-prompts`);
-  }
-
-  updateSystemPrompt(promptUpdate: SystemPromptUpdate): Observable<any> {
-    return this.http.post(`${this.baseUrl}/system-prompts`, promptUpdate, {
-      headers: new HttpHeaders({
-        'Content-Type': 'application/json'
-      })
-    });
-  }
-
-  resetAllSystemPrompts(): Observable<any> {
-    return this.http.post(`${this.baseUrl}/system-prompts/reset`, {});
-  }
-
-  resetSystemPrompt(modelType: 'intent' | 'sql'): Observable<any> {
-    return this.http.post(`${this.baseUrl}/system-prompts/reset/${modelType}`, {});
   }
 }
