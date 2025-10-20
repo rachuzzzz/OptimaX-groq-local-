@@ -1,15 +1,15 @@
 <div align="center">
   <img src="LOGO.png" alt="OptimaX Logo" width="200"/>
 
-  # OptimaX - Intelligent SQL Chat Application
+  # OptimaX v4.0 - SQL Chat Application
 
-  **AI-Powered Natural Language to SQL with 100% Local Execution**
+  **AI-Powered Natural Language to SQL with Simplified Architecture**
 
   [![Angular](https://img.shields.io/badge/Angular-20.3-DD0031?logo=angular)](https://angular.io/)
   [![FastAPI](https://img.shields.io/badge/FastAPI-0.104-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
-  [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python)](https://www.python.org/)
+  [![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python)](https://www.python.org/)
   [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14+-336791?logo=postgresql)](https://www.postgresql.org/)
-  [![Ollama](https://img.shields.io/badge/Ollama-Local_LLM-000000)](https://ollama.ai/)
+  [![Groq](https://img.shields.io/badge/Groq-Cloud_LLM-FF6B6B)](https://groq.com/)
 
 </div>
 
@@ -17,18 +17,17 @@
 
 ## 📖 About OptimaX
 
-OptimaX is an intelligent SQL chat application that allows users to query traffic accident data using natural language. Built with modern web technologies and powered by local LLMs, it delivers fast, secure, and privacy-focused database interactions without any cloud dependencies.
+OptimaX v4.0 is an intelligent SQL chat application that allows users to query traffic accident data using natural language. Built with a clean, simplified architecture using a single Groq LLM and LlamaIndex tools for fast, intelligent database interactions.
 
 ### 🎯 Key Features
 
 - **Natural Language Queries** - Ask questions in plain English, get SQL results
-- **100% Local Execution** - All AI processing runs locally via Ollama (no cloud APIs)
-- **Lightning Fast** - 70-80% faster with heuristic routing and multi-level caching
+- **Single LLM Architecture** - Groq llama-3.3-70b for all tasks (chat, SQL, reasoning)
+- **Smart Tools** - SQL execution + Chart recommendations
 - **Modern Glass UI** - Beautiful glass morphism design with smooth animations
 - **Real-time Charts** - Automatic chart detection and visualization
-- **Developer Tools** - Built-in debug panel with SQL query inspection
-- **Smart Routing** - Heuristic pattern matching for 60-80% of queries
-- **Multi-level Cache** - Intelligent caching system (99.6% faster for cached queries)
+- **Session Memory** - Multi-turn conversation context
+- **Developer Friendly** - Clean, simple codebase (2 backend files)
 
 ### 📊 Dataset
 
@@ -42,11 +41,11 @@ OptimaX is an intelligent SQL chat application that allows users to query traffi
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture (v4.0 Simplified)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    OptimaX Architecture                      │
+│                OptimaX 4.0 - Single-LLM Architecture         │
 ├─────────────────────────────────────────────────────────────┤
 │                                                               │
 │  Frontend (Angular 20)                                       │
@@ -54,22 +53,21 @@ OptimaX is an intelligent SQL chat application that allows users to query traffi
 │  │ • Glass Morphism UI                                 │    │
 │  │ • Chart.js Visualization                            │    │
 │  │ • Real-time Chat Interface                          │    │
-│  │ • Developer Debug Panel                             │    │
+│  │ • Session Management                                │    │
 │  └────────────────────────────────────────────────────┘    │
 │                           │                                  │
 │                           ↓ HTTP/REST                        │
 │                                                               │
-│  Backend (FastAPI + Python)                                  │
+│  Backend (FastAPI + LlamaIndex)                              │
 │  ┌────────────────────────────────────────────────────┐    │
-│  │ Heuristic Router (60-80% hit rate)                  │    │
+│  │ ReActAgent (Groq llama-3.3-70b)                     │    │
 │  │         ↓                                            │    │
-│  │ Async Inference Engine                              │    │
+│  │ Tools:                                               │    │
+│  │   • execute_sql - SQL query execution               │    │
+│  │   • get_schema - Database schema info               │    │
+│  │   • recommend_chart - Chart suggestions             │    │
 │  │         ↓                                            │    │
-│  │ Query Cache (Multi-level)                           │    │
-│  │         ↓                                            │    │
-│  │ Local LLM (Ollama)                                  │    │
-│  │   • Phi-3 Mini (Intent Routing)                     │    │
-│  │   • Qwen2.5-Coder 3B (SQL Generation)              │    │
+│  │ Session Memory - Multi-turn Context                 │    │
 │  └────────────────────────────────────────────────────┘    │
 │                           │                                  │
 │                           ↓ SQL                              │
@@ -88,18 +86,16 @@ OptimaX is an intelligent SQL chat application that allows users to query traffi
 
 ### Prerequisites
 
-Before you begin, ensure you have the following installed:
-
 - **Node.js** 18+ and npm ([Download](https://nodejs.org/))
-- **Python** 3.10+ ([Download](https://www.python.org/downloads/))
+- **Python** 3.9+ ([Download](https://www.python.org/downloads/))
 - **PostgreSQL** 14+ ([Download](https://www.postgresql.org/download/))
-- **Ollama** ([Download](https://ollama.ai/))
+- **Groq API Key** ([Get free key](https://console.groq.com/keys))
 - **Git** ([Download](https://git-scm.com/))
 
 ### Step 1: Clone the Repository
 
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/rachuzzzz/OptimaX-groq-local-.git
 cd OptimaX
 ```
 
@@ -136,7 +132,7 @@ psql -U postgres -d traffic_db -f create_accidents_table.sql
 psql -U postgres -d traffic_db
 
 # Inside psql:
-\COPY accidents FROM 'path/to/US_Accidents.csv' DELIMITER ',' CSV HEADER;
+\COPY us_accidents FROM 'path/to/US_Accidents.csv' DELIMITER ',' CSV HEADER;
 ```
 
 **Note:** Import may take 30-60 minutes depending on your system.
@@ -152,10 +148,7 @@ cd sql-chat-backend
 #### 3.2 Install Python Dependencies
 
 ```bash
-# Using pip
-pip install -r requirements.txt
-
-# Or using a virtual environment (recommended)
+# Using a virtual environment (recommended)
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
@@ -165,37 +158,21 @@ pip install -r requirements.txt
 
 Create a `.env` file in the `sql-chat-backend` directory:
 
-```bash
+```env
 # .env file
+GROQ_API_KEY=your_groq_api_key_here
 DATABASE_URL=postgresql://postgres:your_password@localhost:5432/traffic_db
-OLLAMA_BASE_URL=http://localhost:11434
 ```
 
-**Replace `your_password` with your PostgreSQL password.**
+**Get your Groq API key at:** https://console.groq.com/keys
 
-#### 3.4 Pull Required Ollama Models
-
-```bash
-# Pull Phi-3 Mini for intent routing
-ollama pull phi3:mini
-
-# Pull Qwen2.5-Coder for SQL generation
-ollama pull qwen2.5-coder:3b
-```
-
-**Note:** First-time model downloads may take 5-15 minutes depending on your internet speed.
-
-#### 3.5 Start Backend Server
+#### 3.4 Start Backend Server
 
 ```bash
-# Start the optimized backend
-python main_optimized.py
-
-# Or start the original backend
 python main.py
 ```
 
-Backend will be available at: `http://localhost:8002`
+Backend will be available at: `http://localhost:8000`
 
 ### Step 4: Setup Frontend
 
@@ -211,13 +188,10 @@ cd sql-chat-app
 npm install
 ```
 
-**Note:** Installation may take 2-5 minutes.
-
 #### 4.3 Start Development Server
 
 ```bash
 ng serve
-
 # Or use npm
 npm start
 ```
@@ -227,8 +201,7 @@ Frontend will be available at: `http://localhost:4200`
 ### Step 5: Access the Application
 
 1. Open your browser and navigate to `http://localhost:4200`
-2. Wait for the initialization sequence to complete
-3. Start chatting with your database!
+2. Start chatting with your database!
 
 ---
 
@@ -236,35 +209,29 @@ Frontend will be available at: `http://localhost:4200`
 
 ### Example Queries
 
-Try these natural language queries:
-
 #### Geographic Analysis
 ```
 "Show me the top 10 states with the most accidents"
 "Which city has the most accidents?"
 "Find accidents in California"
-"Compare accidents in Texas vs Florida"
 ```
 
 #### Weather Analysis
 ```
-"Show accidents during rain weather"
+"Show accidents during rain"
 "Which weather conditions cause the most accidents?"
-"Find accidents with visibility less than 2 miles"
 ```
 
 #### Severity Analysis
 ```
 "Count accidents by severity level"
 "Show me severe accidents in New York"
-"What percentage of accidents are severity 4?"
 ```
 
 #### Temporal Analysis
 ```
 "Show accidents by month in 2021"
 "What time of day has the most accidents?"
-"Compare morning vs evening accidents"
 ```
 
 ---
@@ -276,44 +243,18 @@ Try these natural language queries:
 - **Language:** TypeScript 5.9
 - **Styling:** SCSS with Glass Morphism
 - **Charts:** Chart.js + ng2-charts
-- **HTTP Client:** RxJS + Angular HttpClient
 
 ### Backend
 - **Framework:** FastAPI 0.104.1
-- **Language:** Python 3.10+
-- **LLM Framework:** llama-index 0.10.68
-- **Async HTTP:** aiohttp 3.9.1
-- **Database ORM:** SQLAlchemy 2.0.23
-- **Database Driver:** psycopg2-binary 2.9.9
-
-### Database
-- **DBMS:** PostgreSQL 14+
-- **Records:** 7.7+ Million
-- **Size:** ~2.5GB
+- **Language:** Python 3.9+
+- **LLM:** Groq llama-3.3-70b-versatile
+- **Agent Framework:** LlamaIndex
+- **Database:** PostgreSQL with SQLAlchemy
 
 ### AI/ML
-- **LLM Runtime:** Ollama (Local)
-- **Intent Router:** Phi-3 Mini (3.8B parameters)
-- **SQL Generator:** Qwen2.5-Coder (3B parameters)
-
----
-
-## 📊 Performance
-
-### Response Times
-
-| Query Type | Before Optimization | After Optimization | Improvement |
-|------------|-------------------|-------------------|-------------|
-| Cached Query | 2500ms | 5-10ms | **99.6% faster** ⚡⚡⚡ |
-| SQL (Heuristic) | 3000ms | 600ms | **80% faster** ⚡⚡ |
-| SQL (LLM) | 3500ms | 1200ms | **66% faster** ⚡ |
-| Chat (Cached) | 2000ms | 5-10ms | **99.5% faster** ⚡⚡⚡ |
-
-### Key Metrics
-- **Heuristic Hit Rate:** 60-80%
-- **Cache Hit Rate:** 60-80% (after warmup)
-- **LLM Call Reduction:** 60-80%
-- **Throughput Increase:** 3-5x
+- **LLM Provider:** Groq Cloud
+- **Model:** llama-3.3-70b-versatile
+- **Agent:** LlamaIndex ReActAgent
 
 ---
 
@@ -327,31 +268,20 @@ OptimaX/
 │   │   │   ├── components/
 │   │   │   │   ├── chat-interface/       # Main chat UI
 │   │   │   │   ├── chart-visualization/  # Chart rendering
-│   │   │   │   ├── system-prompt-manager/# Prompt editor
 │   │   │   │   └── loading-screen/       # Loading animation
 │   │   │   └── services/
-│   │   │       ├── chat.service.ts       # API communication
-│   │   │       └── chart-detection.service.ts
+│   │   │       └── chat.service.ts       # API communication
 │   │   └── styles.scss                   # Global styles
-│   ├── package.json
-│   └── angular.json
+│   └── package.json
 │
 ├── sql-chat-backend/                # FastAPI Backend
-│   ├── main_optimized.py            # ⭐ Optimized backend
-│   ├── main.py                      # Original backend
-│   ├── heuristic_router.py          # Smart routing engine
-│   ├── async_inference.py           # Async LLM inference
-│   ├── query_cache.py               # Multi-level caching
-│   ├── test_optimizations.py        # Test suite
+│   ├── main.py                      # FastAPI app + Agent (v4.0)
+│   ├── tools.py                     # SQL + Chart tools
 │   ├── requirements.txt             # Python dependencies
-│   ├── .env                         # Environment config
-│   ├── QUICK_START.md              # Setup guide
-│   ├── OPTIMIZATION_GUIDE.md        # Detailed docs
-│   └── BENCHMARKS.md               # Performance data
+│   └── .env                         # Environment config
 │
-├── create_accidents_table.sql       # Database schema
+├── V4_ARCHITECTURE.md               # Detailed architecture docs
 ├── LOGO.png                         # Application logo
-├── OPTIMIZATION_SUMMARY.md          # Optimization overview
 └── README.md                        # This file
 ```
 
@@ -364,138 +294,78 @@ OptimaX/
 Edit `sql-chat-backend/.env`:
 
 ```env
+# Groq API
+GROQ_API_KEY=your_groq_api_key_here
+
 # Database connection
 DATABASE_URL=postgresql://user:password@host:port/database
-
-# Ollama configuration
-OLLAMA_BASE_URL=http://localhost:11434
-
-# Server configuration (optional)
-HOST=0.0.0.0
-PORT=8002
-DEBUG=false
 ```
 
 ### Frontend Configuration
 
-Edit `sql-chat-app/src/environments/environment.ts`:
+The frontend is pre-configured to connect to `http://localhost:8000` (backend).
+
+To change, edit `sql-chat-app/src/app/services/chat.service.ts`:
 
 ```typescript
-export const environment = {
-  production: false,
-  apiUrl: 'http://localhost:8002'
-};
-```
-
-### Optimization Tuning
-
-Adjust cache sizes and TTL in `sql-chat-backend/query_cache.py`:
-
-```python
-# Configure cache parameters
-cache = get_query_cache(
-    max_size=1000,      # Max cached entries
-    default_ttl=3600    # 1 hour TTL
-)
+private apiUrl = 'http://localhost:8000';  // Update if needed
 ```
 
 ---
 
 ## 🧪 Testing
 
-### Run Backend Tests
+### Backend Health Check
 
 ```bash
-cd sql-chat-backend
-python test_optimizations.py
+curl http://localhost:8000/health
 ```
 
-Tests include:
-- ✅ Heuristic router accuracy (80-90%)
-- ✅ Async inference performance
-- ✅ Cache hit rate validation
-- ✅ End-to-end query processing
-
-### Run Frontend Tests
+### Test Query
 
 ```bash
-cd sql-chat-app
-ng test
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "show me top 5 states"}'
 ```
 
 ---
 
-## 📈 Monitoring
+## 📈 API Endpoints
 
-### Performance Metrics Endpoint
+### Core Endpoints
 
-```bash
-# Get real-time performance metrics
-curl http://localhost:8002/performance
-```
-
-**Response:**
-```json
-{
-  "total_requests": 1000,
-  "heuristic_routing": {
-    "hits": 750,
-    "percentage": 75.0
-  },
-  "cache_stats": {
-    "hit_rate": 0.72,
-    "total_entries": 250
-  },
-  "response_times": {
-    "average_ms": 650
-  }
-}
-```
-
-### Continuous Monitoring
-
-```bash
-# Monitor performance continuously
-watch -n 5 'curl -s http://localhost:8002/performance | jq'
-```
+- `POST /chat` - Send message, get response
+- `GET /health` - Health check
+- `GET /sessions` - List active sessions
+- `DELETE /sessions/{id}` - Delete session
+- `GET /models` - Model information
+- `GET /table-info` - Database schema
 
 ---
 
 ## 🐛 Troubleshooting
 
-### Common Issues
+### Backend Won't Start
 
-#### 1. Backend Won't Start
-
-**Error:** `ModuleNotFoundError: No module named 'X'`
+**Error:** `GROQ_API_KEY not found`
 
 **Solution:**
 ```bash
-pip install -r requirements.txt
+# Add to .env file
+GROQ_API_KEY=your_key_here
 ```
 
-#### 2. Database Connection Failed
+### Database Connection Failed
 
-**Error:** `could not connect to server: Connection refused`
-
-**Solution:**
-- Verify PostgreSQL is running: `pg_ctl status`
-- Check `.env` file has correct credentials
-- Test connection: `psql -U postgres -d traffic_db`
-
-#### 3. Ollama Models Not Found
-
-**Error:** `model 'phi3:mini' not found`
+**Error:** `could not connect to server`
 
 **Solution:**
-```bash
-ollama pull phi3:mini
-ollama pull qwen2.5-coder:3b
-```
+- Verify PostgreSQL is running
+- Check `.env` has correct credentials
+- Test: `psql -U postgres -d traffic_db`
 
-#### 4. Frontend Build Errors
-
-**Error:** `An unhandled exception occurred: Cannot find module '@angular/...'`
+### Frontend Build Errors
 
 **Solution:**
 ```bash
@@ -503,60 +373,16 @@ rm -rf node_modules package-lock.json
 npm install
 ```
 
-#### 5. Slow Response Times
-
-**Issue:** Queries taking >5 seconds
-
-**Solution:**
-- Check cache hit rate: `curl http://localhost:8002/performance`
-- Ensure Ollama is running: `ollama list`
-- Verify database indexes exist
-- Monitor system resources (CPU/RAM)
-
 ---
 
-## 📚 API Documentation
+## 📚 Documentation
 
-### Core Endpoints
-
-#### POST `/chat`
-Send a chat message and get SQL results
-
-**Request:**
-```json
-{
-  "message": "Show me accidents in California"
-}
-```
-
-**Response:**
-```json
-{
-  "response": "Found 1,234,567 accidents in California",
-  "sql_query": "SELECT COUNT(*) FROM accidents WHERE state = 'CA'",
-  "data": [...]
-}
-```
-
-#### GET `/performance`
-Get real-time performance metrics
-
-#### GET `/health`
-Health check endpoint
-
-#### GET `/table-info`
-Get database schema information
-
-### System Prompt Endpoints
-
-#### GET `/system-prompts`
-Get current system prompts
-
-#### POST `/system-prompts`
-Update system prompts
-
-#### POST `/system-prompts/reset`
-Reset prompts to defaults
+See [V4_ARCHITECTURE.md](./V4_ARCHITECTURE.md) for:
+- Complete architecture overview
+- Tool descriptions
+- System prompt details
+- Migration from v3.0
+- Enhancement ideas
 
 ---
 
@@ -570,29 +396,21 @@ cd sql-chat-app
 ng build --configuration production
 ```
 
-Output will be in `dist/sql-chat-app/`
-
 #### Backend
 ```bash
 cd sql-chat-backend
-uvicorn main_optimized:app --host 0.0.0.0 --port 8002 --workers 4
+uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
 ```
-
-### Docker Deployment (Optional)
-
-Coming soon! Docker Compose configuration for easy deployment.
 
 ---
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please follow these steps:
-
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+2. Create feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit changes (`git commit -m 'Add feature'`)
+4. Push to branch (`git push origin feature/amazing-feature`)
+5. Open Pull Request
 
 ---
 
@@ -600,59 +418,53 @@ Contributions are welcome! Please follow these steps:
 
 This project is for educational and demonstration purposes.
 
-**Dataset License:** [US Accidents Dataset](https://www.kaggle.com/datasets/sobhanmoosavi/us-accidents) - Check Kaggle for license details.
+**Dataset License:** [US Accidents Dataset](https://www.kaggle.com/datasets/sobhanmoosavi/us-accidents)
 
 ---
 
 ## 🙏 Acknowledgments
 
-- **Ollama** - Local LLM inference platform
-- **Anthropic** - Claude for development assistance
-- **Angular Team** - Excellent frontend framework
-- **FastAPI** - Modern Python web framework
-- **Sobhan Moosavi** - US Accidents dataset creator
-- **Kaggle** - Dataset hosting platform
+- **Groq** - Fast LLM inference platform
+- **LlamaIndex** - Agent framework
+- **Angular Team** - Frontend framework
+- **FastAPI** - Python web framework
+- **Sobhan Moosavi** - Dataset creator
 
 ---
 
 ## 📞 Support
 
 ### Documentation
-- [Quick Start Guide](sql-chat-backend/QUICK_START.md)
-- [Optimization Guide](sql-chat-backend/OPTIMIZATION_GUIDE.md)
-- [Performance Benchmarks](sql-chat-backend/BENCHMARKS.md)
-- [Optimization Summary](OPTIMIZATION_SUMMARY.md)
+- [V4 Architecture Guide](V4_ARCHITECTURE.md)
 
 ### Need Help?
-1. Check documentation files
-2. Run test suite: `python test_optimizations.py`
-3. Review performance metrics: `curl http://localhost:8002/performance`
-4. Check application logs
+1. Check V4_ARCHITECTURE.md
+2. Review API endpoints at `/docs` (FastAPI auto-docs)
+3. Check application logs
+4. Test with health check endpoint
 
 ---
 
 ## 🎉 Success Indicators
 
 You're ready when you see:
-- ✅ Backend starts without errors
+- ✅ Backend starts at port 8000
 - ✅ Frontend loads at `http://localhost:4200`
-- ✅ Test suite passes (80-90% accuracy)
-- ✅ Heuristic hit rate >60%
-- ✅ Average response time <1000ms
+- ✅ Health check returns `{"status": "healthy"}`
+- ✅ Database connection successful
+- ✅ Groq LLM initialized
 - ✅ Charts rendering correctly
-- ✅ No database connection errors
 
 ---
 
 <div align="center">
 
-**Version:** 2.0.0 (Optimized)
+**Version:** 4.0.0
 **Status:** ✅ Production Ready
-**Performance:** 70-80% faster than v1.0
-**Privacy:** 100% Local (No cloud dependencies)
+**Architecture:** Single-LLM (Groq) + LlamaIndex Tools
 
-**Built with ❤️ using Angular, FastAPI, and Ollama**
+**Built with ❤️ using Angular, FastAPI, LlamaIndex, and Groq**
 
-[⬆ Back to Top](#optimax---intelligent-sql-chat-application)
+[⬆ Back to Top](#optimax-v40---sql-chat-application)
 
 </div>

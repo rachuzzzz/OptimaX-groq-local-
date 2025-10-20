@@ -1,8 +1,9 @@
 import { Component, Input, OnInit, ViewChild, ElementRef, AfterViewInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Chart, ChartConfiguration, ChartType, registerables } from 'chart.js';
+import zoomPlugin from 'chartjs-plugin-zoom';
 
-Chart.register(...registerables);
+Chart.register(...registerables, zoomPlugin);
 
 export interface ChartData {
   type: ChartType;
@@ -87,6 +88,26 @@ export class ChartVisualizationComponent implements AfterViewInit {
             padding: 12,
             displayColors: true,
             boxPadding: 6
+          },
+          zoom: {
+            zoom: {
+              wheel: {
+                enabled: true,
+                speed: 0.1
+              },
+              pinch: {
+                enabled: true
+              },
+              mode: 'x'
+            },
+            pan: {
+              enabled: true,
+              mode: 'x',
+              modifierKey: 'ctrl'
+            },
+            limits: {
+              x: {min: 'original', max: 'original'}
+            }
           }
         },
         scales: this.currentType !== 'pie' && this.currentType !== 'doughnut' ? {
@@ -144,5 +165,23 @@ export class ChartVisualizationComponent implements AfterViewInit {
 
   toggleView() {
     this.showChart = !this.showChart;
+  }
+
+  resetZoom() {
+    if (this.chart) {
+      this.chart.resetZoom();
+    }
+  }
+
+  zoomIn() {
+    if (this.chart) {
+      this.chart.zoom(1.1);
+    }
+  }
+
+  zoomOut() {
+    if (this.chart) {
+      this.chart.zoom(0.9);
+    }
   }
 }

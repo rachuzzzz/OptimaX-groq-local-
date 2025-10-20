@@ -1,12 +1,24 @@
+# OptimaX v4.0 - Simplified Single-LLM Architecture
+# Using Groq + LlamaIndex with focused tools
+
+# Core Framework
 fastapi==0.104.1
 uvicorn==0.24.0
-llama-index==0.10.68
-llama-index-llms-ollama==0.1.5
+pydantic==2.8.0
+
+# LlamaIndex + Groq
+llama-index-core==0.12.0
+llama-index-llms-groq==0.3.0
+
+# Database
 psycopg2-binary==2.9.9
 sqlalchemy==2.0.23
+
+# Data Processing
 pandas==2.1.4
+
+# Utilities
 python-dotenv==1.0.0
-pydantic==2.8.0
 sqlparse==0.4.4
 requests==2.31.0
 aiohttp==3.9.1

@@ -129,6 +129,41 @@
         margin: 0 4px;
       }
 
+      .zoom-btn {
+        background: rgba(30, 30, 35, 0.6);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(107, 114, 128, 0.3);
+        border-radius: 8px;
+        color: #9ca3af;
+        cursor: pointer;
+        padding: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+
+        &:hover {
+          border-color: rgba(212, 175, 55, 0.5);
+          background: rgba(212, 175, 55, 0.1);
+          color: #ffd700;
+          transform: translateY(-2px);
+
+          svg {
+            transform: scale(1.1);
+          }
+        }
+
+        &:active {
+          transform: translateY(0) scale(0.95);
+        }
+
+        svg {
+          width: 14px;
+          height: 14px;
+          transition: all 0.3s ease;
+        }
+      }
+
       .download-btn {
         background: linear-gradient(135deg, rgba(212, 175, 55, 0.15), rgba(212, 175, 55, 0.08));
         backdrop-filter: blur(10px);
@@ -173,10 +208,48 @@
     height: 350px;
     width: 100%;
 
+    .zoom-hint {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: rgba(30, 30, 35, 0.85);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(212, 175, 55, 0.2);
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 11px;
+      color: #9ca3af;
+      z-index: 10;
+      pointer-events: none;
+      animation: fadeIn 0.5s ease;
+
+      span {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+    }
+
     canvas {
       max-height: 100%;
       width: 100%;
+      cursor: grab;
+
+      &:active {
+        cursor: grabbing;
+      }
     }
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 

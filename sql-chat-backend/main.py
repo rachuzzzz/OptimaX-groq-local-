@@ -1,3 +1,16 @@
+"""
+OptimaX v4.0 - Simplified Single-LLM Architecture
+==================================================
+
+Clean implementation using:
+- Single Groq LLM (llama-3.3-70b-versatile) for ALL tasks
+- LlamaIndex ReActAgent for tool orchestration
+- Simple tools: SQL execution + Chart recommendation
+
+Author: OptimaX Team
+Version: 4.0
+"""
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -5,668 +18,530 @@ from typing import Optional, List, Dict, Any
 import os
 from dotenv import load_dotenv
 import logging
-from sqlalchemy import create_engine, text
-import sqlparse
-import re
-import requests
 from datetime import datetime
+import uuid
+import asyncio
+
+from llama_index.llms.groq import Groq
+from llama_index.core.agent import ReActAgent
+from llama_index.core.memory import ChatMemoryBuffer
+from llama_index.core.llms import ChatMessage, MessageRole
+
+from tools import initialize_tools, get_last_sql_result, clear_last_sql_result
 
 load_dotenv()
 
-app = FastAPI(title="OptimaX SQL Chat API")
+# Configure logging - minimal for free tier performance
+logging.basicConfig(
+    level=logging.WARNING,  # Free tier optimization: reduce console spam
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # Keep INFO for our app, WARNING for libraries
 
+# Initialize FastAPI
+app = FastAPI(
+    title="OptimaX SQL Chat API",
+    description="Simplified single-LLM architecture with Groq + LlamaIndex",
+    version="4.0"
+)
+
+# CORS - relaxed for local testing
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200"],
+    allow_origins=["*"],  # Free tier: allow all origins for easy testing
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-logger = logging.getLogger(__name__)
+# Configuration
+DATABASE_URL = os.getenv("DATABASE_URL")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = "llama-3.3-70b-versatile"  # Available on your API key
 
-# Initialize router model globally
-router_pipeline = None
-
-AVAILABLE_SQL_MODELS = {
-    "qwen2.5-coder:3b": "Qwen2.5-Coder 3B - Fast SQL generation",
-    "codellama:7b-instruct-q4_K_M": "CodeLlama 7B Instruct (Quantized) - Fallback model"
-}
-
-DEFAULT_SQL_MODEL = "qwen2.5-coder:3b"
-INTENT_MODEL = "phi3:mini"
-
-# Default system prompts
-DEFAULT_INTENT_PROMPT = """Classify the user's intent.
-
-SQL_INTENT: Questions about traffic accident data, statistics, counts, weather, locations, severity, patterns
-CHAT_INTENT: Greetings, general chat, questions about system capabilities
-
-Respond ONLY with "SQL_INTENT" or "CHAT_INTENT"."""
-
-DEFAULT_SQL_PROMPT = """You are a PostgreSQL expert. Generate ONLY the SQL query, no explanations.
-
-Database Schema:
-{schema_text}
-
-Important Data Types & Values:
-- severity: integer (1=low, 2=medium, 3=high, 4=severe)
-- weather_condition: text values like 'Snow', 'Rain', 'Clear', etc.
-- state: 2-letter codes like 'CA', 'TX', 'FL'
-- Boolean columns: true/false values (amenity, bump, crossing, give_way, junction, no_exit, railway, roundabout, station, stop, traffic_calming, traffic_signal, turning_loop)
-
-CRITICAL RULES:
-1. ALWAYS use aggregation (COUNT, AVG, SUM, etc.) - NEVER return raw accident records
-2. Use exact column names from schema
-3. severity is INTEGER: use numbers (1,2,3,4) not text
-4. For "severe": use severity >= 3 or severity = 4
-5. Always use PostgreSQL syntax
-6. Group results meaningfully (by city, state, severity, weather, etc.)
-7. Order results by count/metric DESC
-8. Use LIMIT 10-20 for top results
-9. For location queries: use traffic_signal = true (not separate tables)
-10. NO PostGIS functions - use simple WHERE conditions
-11. NO geography/geometry casting or spatial functions
-
-Query Pattern Examples:
-❌ BAD: SELECT * FROM us_accidents WHERE traffic_signal = true AND state = 'CA';
-✅ GOOD: SELECT city, COUNT(*) as accident_count FROM us_accidents WHERE traffic_signal = true AND state = 'CA' GROUP BY city ORDER BY accident_count DESC LIMIT 10;
-
-❌ BAD: SELECT id, start_time, severity FROM us_accidents WHERE weather_condition = 'Snow';
-✅ GOOD: SELECT state, COUNT(*) as snow_accidents FROM us_accidents WHERE weather_condition ILIKE '%Snow%' GROUP BY state ORDER BY snow_accidents DESC LIMIT 10;
-
-More Examples:
-- "accidents near traffic signals in CA" -> SELECT city, COUNT(*) as count FROM us_accidents WHERE traffic_signal = true AND state = 'CA' GROUP BY city ORDER BY count DESC LIMIT 10;
-- "severe accidents" -> SELECT state, COUNT(*) as severe_count FROM us_accidents WHERE severity >= 3 GROUP BY state ORDER BY severe_count DESC LIMIT 15;
-- "accidents by weather" -> SELECT weather_condition, COUNT(*) as count FROM us_accidents GROUP BY weather_condition ORDER BY count DESC LIMIT 10;
-
-Question: {question}
-
-PostgreSQL Query (MUST use aggregation):"""
-
-# Current system prompts (can be modified by users)
-current_intent_prompt = DEFAULT_INTENT_PROMPT
-current_sql_prompt = DEFAULT_SQL_PROMPT
-
-def initialize_router_model():
-    """Initialize Phi-3 via Ollama for query routing"""
-    global router_pipeline
-    try:
-        # Use local Ollama Phi-3
-        from llama_index.llms.ollama import Ollama
-
-        router_pipeline = Ollama(
-            model="phi3:mini",  # Use your specific phi3:mini model
-            base_url="http://localhost:11434",
-            temperature=0.1,
-            request_timeout=60.0  # Increased timeout for intent classification
-        )
-        logger.info("Router model (Ollama Phi-3) connected successfully")
-    except Exception as e:
-        logger.error(f"Failed to connect to Ollama Phi-3: {str(e)}")
-        router_pipeline = None
-        logger.error("Ollama Phi-3 not available - system requires LLM models to function")
-
-def route_query_with_llm(user_message: str) -> str:
-    """Route query using Ollama Phi-3 to classify as SQL_INTENT or CHAT_INTENT"""
-    if router_pipeline is None:
-        raise RuntimeError("Router model not loaded. Cannot process requests without LLM.")
-
-    input_text = f"{current_intent_prompt}\n\nUser question: {user_message}\n\nIntent:"
-
-    try:
-        response = router_pipeline.complete(input_text)
-        generated_text = response.text.strip().upper()
-
-        if "SQL_INTENT" in generated_text:
-            return "sql"
-        elif "CHAT_INTENT" in generated_text:
-            return "chat"
-        else:
-            # No fallback - raise error if LLM doesn't provide clear intent
-            raise RuntimeError(f"LLM failed to classify intent. Response was: {generated_text}")
-    except Exception as e:
-        logger.error(f"Error calling Ollama Phi-3: {str(e)}")
-        raise RuntimeError(f"Intent classification failed: {str(e)}")
+# Global instances
+agent = None
+db_manager = None
+sessions = {}  # Session storage {session_id: {agent, memory, metadata}}
 
 
-def generate_chat_response(user_message: str) -> str:
-    """Generate chat response for general questions"""
-    if router_pipeline is None:
-        raise RuntimeError("Chat model not loaded. Cannot generate responses without LLM.")
-
-    chat_prompt = f"""You are OptimaX, a helpful AI assistant specialized in analyzing US traffic accident data.
-You are friendly and professional. Keep responses concise and helpful.
-If asked about your capabilities, mention you can analyze US traffic accident data through SQL queries.
-
-User: {user_message}
-Assistant:"""
-
-    try:
-        response = router_pipeline.complete(chat_prompt)
-        generated_text = response.text.strip()
-
-        # No hardcoded extraction - trust LLM output directly
-        if not generated_text or len(generated_text) < 5:
-            raise RuntimeError("LLM generated chat response is too short or empty")
-
-        return generated_text
-    except Exception as e:
-        logger.error(f"Error generating chat response with Ollama: {str(e)}")
-        raise RuntimeError(f"Chat response generation failed: {str(e)}")
-
+# Pydantic Models
 class ChatMessage(BaseModel):
     message: str
+    session_id: Optional[str] = None
     system_prompt: Optional[str] = None
-    sql_model: Optional[str] = DEFAULT_SQL_MODEL
-    include_sql: Optional[bool] = None
-    row_limit: Optional[int] = 50  # Default limit of 50 rows for aggregated results
+    include_sql: Optional[bool] = True
+    include_tasks: Optional[bool] = False
+    row_limit: Optional[int] = 50
+
 
 class ChatResponse(BaseModel):
     response: str
+    session_id: str
     sql_query: Optional[str] = None
     error: Optional[str] = None
-    data: Optional[Dict[str, Any]] = None
-    query_results: Optional[List[Dict[str, Any]]] = None
-    model_used: Optional[str] = None
-    execution_time: Optional[float] = None
-
-class SystemPromptUpdate(BaseModel):
-    model_type: str  # "intent" or "sql"
-    prompt: str
-
-class SystemPromptsResponse(BaseModel):
-    intent_prompt: str
-    sql_prompt: str
-    default_intent_prompt: str
-    default_sql_prompt: str
-
-class TextToSQLEngine:
-    def __init__(self):
-        self.engine = None
-        self.table_schema = None
-        self.initialize()
-
-    def initialize(self):
-        try:
-            # Initialize router model first
-            initialize_router_model()
-
-            database_url = os.getenv("DATABASE_URL")
-            if not database_url:
-                raise ValueError("DATABASE_URL not set in environment")
-
-            self.engine = create_engine(database_url)
-
-            logger.info("Using local Ollama for SQL generation")
-
-            # Get table schema information
-            self.load_table_schema()
-
-            logger.info("Text-to-SQL engine initialized successfully")
-
-        except Exception as e:
-            logger.error(f"Failed to initialize Text-to-SQL engine: {str(e)}")
-            raise
-
-    def load_table_schema(self):
-        """Load detailed table schema with column types"""
-        try:
-            with self.engine.connect() as conn:
-                result = conn.execute(text("""
-                    SELECT column_name, data_type, is_nullable
-                    FROM information_schema.columns
-                    WHERE table_name = 'us_accidents'
-                    ORDER BY ordinal_position
-                """))
-
-                schema_info = []
-                for row in result:
-                    col_name, data_type, nullable = row
-                    schema_info.append(f"{col_name} ({data_type})")
-
-                self.table_schema = {
-                    "table_name": "us_accidents",
-                    "columns": schema_info,
-                    "schema_text": f"CREATE TABLE us_accidents (\n  {', '.join(schema_info)}\n);"
-                }
-
-                logger.info(f"Loaded schema for table: us_accidents with {len(schema_info)} columns")
-
-        except Exception as e:
-            logger.error(f"Failed to load table schema: {str(e)}")
-            raise
-
-    def validate_sql(self, sql_query: str, row_limit: int = 50) -> tuple[bool, str]:
-        """Validate SQL for safety and syntax - fast rule-based approach"""
-        try:
-            # Parse SQL
-            parsed = sqlparse.parse(sql_query)
-            if not parsed:
-                return False, "Invalid SQL syntax"
-
-            # Check for dangerous operations
-            dangerous_keywords = ['DROP', 'DELETE', 'UPDATE', 'ALTER', 'INSERT', 'CREATE', 'TRUNCATE']
-            sql_upper = sql_query.upper()
-
-            for keyword in dangerous_keywords:
-                if re.search(rf'\b{keyword}\b', sql_upper):
-                    return False, f"Dangerous operation detected: {keyword}"
-
-            # Ensure it's a SELECT statement
-            if not sql_upper.strip().startswith('SELECT'):
-                return False, "Only SELECT statements are allowed"
-
-            # Add or update LIMIT clause
-            if 'LIMIT' not in sql_upper:
-                # Add LIMIT for safety
-                if not sql_query.rstrip().endswith(';'):
-                    sql_query = sql_query.rstrip() + f' LIMIT {row_limit};'
-                else:
-                    sql_query = sql_query.rstrip(';') + f' LIMIT {row_limit};'
-            else:
-                # Extract existing LIMIT value and enforce max
-                limit_match = re.search(r'LIMIT\s+(\d+)', sql_upper)
-                if limit_match:
-                    existing_limit = int(limit_match.group(1))
-                    if existing_limit > row_limit:
-                        # Replace with max allowed limit
-                        sql_query = re.sub(r'LIMIT\s+\d+', f'LIMIT {row_limit}', sql_query, flags=re.IGNORECASE)
-
-            # Ensure query ends with semicolon
-            if not sql_query.rstrip().endswith(';'):
-                sql_query = sql_query.rstrip() + ';'
-
-            return True, sql_query
-
-        except Exception as e:
-            return False, f"SQL validation error: {str(e)}"
-
-    def generate_sql(self, question: str, model_name: str = DEFAULT_SQL_MODEL, system_prompt: str = None) -> str:
-        """Generate SQL using local Ollama models"""
-        try:
-            # Prepare specialized SQL prompt with schema grounding
-            schema_text = self.table_schema.get("schema_text", "") if self.table_schema else ""
-
-            if system_prompt:
-                prompt = f"{system_prompt}\n\nQuestion: {question}"
-            else:
-                # Use current SQL prompt with schema and question formatting
-                prompt = current_sql_prompt.format(schema_text=schema_text, question=question)
-
-            logger.info(f"Generating SQL with local Ollama model {model_name}: {question}")
-
-            # Call local Ollama API
-            ollama_url = f"{os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')}/api/generate"
-            payload = {
-                "model": model_name,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.1,
-                    "num_predict": 200
-                }
-            }
-
-            headers = {"Content-Type": "application/json"}
-            response = requests.post(ollama_url, json=payload, headers=headers, timeout=60)
-            response.raise_for_status()
-
-            result = response.json()
-            generated_sql = result.get("response", "").strip()
-
-            if not generated_sql:
-                raise Exception("Empty response from Ollama - LLM failed to generate SQL")
-
-            # Extract SQL from markdown code blocks if present
-            if "```" in generated_sql:
-                # Handle ```sql SELECT ... ``` or ``` SELECT ... ```
-                code_block_match = re.search(r'```(?:sql)?\s*(.*?)\s*```', generated_sql, re.DOTALL)
-                if code_block_match:
-                    generated_sql = code_block_match.group(1).strip()
-
-            # Remove common prefixes that LLMs might add
-            sql_prefixes = ["SQL:", "Query:", "PostgreSQL:", "SELECT"]
-            for prefix in sql_prefixes[:-1]:  # Don't strip SELECT itself
-                if generated_sql.upper().startswith(prefix):
-                    generated_sql = generated_sql[len(prefix):].strip()
-
-            logger.info(f"Local Ollama {model_name} generated SQL: {generated_sql}")
-            return generated_sql
-
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error calling local Ollama API: {str(e)}")
-            raise Exception(f"SQL generation failed - Ollama API error: {str(e)}")
-        except Exception as e:
-            logger.error(f"Error generating SQL with local Ollama: {str(e)}")
-            raise Exception(f"SQL generation failed: {str(e)}")
+    query_results: Optional[List[Dict[str, Any]]] = None  # Frontend expects this
+    data: Optional[List[Dict[str, Any]]] = None
+    execution_time: float
+    tasks: Optional[List[Dict[str, Any]]] = None
+    clarification_needed: Optional[bool] = False
+    agent_reasoning: Optional[str] = None
+    chart_recommendation: Optional[Dict[str, Any]] = None
 
 
-query_engine_instance = TextToSQLEngine()
+# System Prompt
+SYSTEM_PROMPT = """YOU ARE **OPTIMAX**, AN EXPERT AI ASSISTANT FOR ANALYZING UNITED STATES TRAFFIC ACCIDENT DATA (2016–2023). YOU HAVE READ-ONLY ACCESS TO A POSTGRESQL DATABASE WITH 7.7 MILLION RECORDS IN THE TABLE `us_accidents`.
+
+YOUR PURPOSE IS TO **GENERATE SQL QUERIES**, **INTERPRET RESULTS**, AND **EXPLAIN INSIGHTS** CLEARLY AND CONCISELY.
+
+---
+
+### CAPABILITIES
+1. **GENERATE ONE SQL QUERY** per user question — read-only, aggregate (COUNT, AVG, SUM, GROUP BY).
+2. **INTERPRET RESULTS** in conversational English with context and significance.
+3. **RECOMMEND CHART TYPES** when the user asks to "visualize", "plot", or "show as chart".
+
+---
+
+### INTENT CLASSIFICATION (STRICT)
+1. **GREETING / CASUAL INTENT (NO TOOL USE)**
+   - Triggered by short or social phrases such as:
+     - "hi", "hello", "hey", "yo", "thanks", "thank you", "who are you", "help", "what can you do"
+   - → IMMEDIATELY RESPOND FRIENDLY AND INFORMATIVE.
+   - → DO NOT CALL OR EXECUTE ANY TOOL OR SQL QUERY.
+   - → REPLY LIKE:
+     > "Hello! 👋 I'm OptimaX — your AI assistant for U.S. traffic accident data (2016–2023).  
+     > I can generate SQL insights, explain trends, and recommend charts. What would you like to explore?"
+   - 🔒 STRICT RULE: If user input is fewer than 6 words and matches greeting/casual intent → **NEVER EXECUTE ANY TOOL.**
+
+2. **DATA QUESTION**
+   - Phrases include: "show me", "how many", "list", "top", "compare", "count", "average", "trend"
+   - → FORMULATE **ONE** SQL query (read-only, aggregate only).
+   - → EXECUTE ONCE, THEN SUMMARIZE INSIGHTS CLEARLY.
+
+3. **VISUALIZATION REQUEST**
+   - Phrases include: "plot", "visualize", "show as chart", "graph", "bar chart", "line chart"
+   - → **DO NOT QUERY DATA**, only **RECOMMEND THE BEST CHART TYPE** for the context.
+
+---
+
+### GREETING SAFEGUARD (MUST FOLLOW)
+If the input **contains only greetings or social niceties**,  
+**RESPOND WITHOUT THINKING FURTHER** — DO NOT generate reasoning, tools, or SQL queries.
+
+Example:
+**User:** "hi"
+**Response:**  
+> "Hi there! 👋 I'm OptimaX — ready to help you analyze U.S. traffic accidents.  
+> You can ask things like *'Top 10 states by accident count'* or *'Compare accidents by weather condition.'*"
+
+---
+
+### WHAT NOT TO DO (EXTENDED)
+- **NEVER** misclassify greetings as data requests.
+- **NEVER** attempt to visualize or query on short inputs (< 6 words) that match greeting intent.
+
+
+---
+
+### DATABASE COLUMNS
+- Geographic: `state`, `city`, `county`, `latitude`, `longitude`
+- Severity: `severity` (1–4, where 4 = most severe)
+- Weather: `weather_condition`, `temperature_f`, `visibility_mi`, `precipitation_in`, `humidity`, `wind_speed_mph`
+- Time: `start_time`, `end_time`, `year`, `month`, `day`, `hour`, `day_of_week`, `is_weekend`
+- Road: `street`, `junction`, `traffic_signal`, `crossing`, `railway`, `stop`
+
+---
+
+### CHAIN OF THOUGHT GUIDE (Internal Reasoning Steps)
+1. **UNDERSTAND** the user's intent (greeting / data / visual).
+2. **IDENTIFY** relevant columns.
+3. **FORMULATE** the best aggregation query (COUNT, AVG, GROUP BY).
+4. **EXECUTE** the query once.
+5. **INTERPRET** results clearly with numbers and percentages.
+6. **SUGGEST** next logical insights ("Would you like this by month or state?").
+
+---
+
+### RESPONSE STYLE
+- FRIENDLY + INFORMATIVE tone.
+- PROVIDE CONTEXT ("California = 1.74 M accidents ≈ 22% of total").
+- SUMMARIZE key insight + optional next step.
+- NEVER show raw SQL output — summarize in natural language.
+
+---
+
+### WHAT NOT TO DO
+- **DO NOT** execute tools during greetings.
+- **DO NOT** return raw rows.
+- **DO NOT** run multiple SQLs for one query.
+- **DO NOT** guess numbers — always query.
+- **DO NOT** output > 50 rows.
+- **DO NOT** skip ordering (use DESC for top values).
+- **DO NOT** omit interpretation or context.
+
+---
+
+### FEW-SHOT EXAMPLES
+
+**User:** "Top 10 states by accident count."
+**SQL:** `SELECT state, COUNT(*) AS accident_count FROM us_accidents GROUP BY state ORDER BY accident_count DESC LIMIT 10;`
+**Response:**
+> California leads with ≈ 1.74 M accidents (22% of U.S. total), followed by Texas (1.23 M) and Florida (0.91 M). High population and urban density likely explain the trend. Would you like monthly patterns next?
+
+**User:** "Visualize accidents by severity."
+**Response:**
+> A bar chart fits best — it shows severity levels 1–4 side-by-side for quick comparison.
+
+---
+
+### EXECUTION RULES
+- EXECUTE SQL ONCE PER REQUEST.
+- ALWAYS AGGREGATE AND ORDER RESULTS.
+- RESPOND CLEARLY WITH INSIGHT + NEXT SUGGESTION.
+
+---"""
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize system on startup"""
+    global agent, db_manager
+
+    try:
+        logger.info("Initializing OptimaX v4.0...")
+
+        # Verify API key
+        if not GROQ_API_KEY:
+            raise ValueError("GROQ_API_KEY not found! Get one at: https://console.groq.com/keys")
+
+        if not DATABASE_URL:
+            raise ValueError("DATABASE_URL not found in environment variables!")
+
+        # Initialize Groq LLM with optimized settings
+        llm = Groq(
+            model=GROQ_MODEL,
+            api_key=GROQ_API_KEY,
+            temperature=0.0,  # Deterministic for faster, consistent responses
+            max_output_tokens=300  # Optimized: greetings ~50 tokens, queries ~200 tokens
+        )
+        logger.info(f"✓ Groq LLM initialized: {GROQ_MODEL}")
+
+        # Initialize tools
+        tools, db_manager = initialize_tools(DATABASE_URL)
+        logger.info(f"✓ Initialized {len(tools)} tools")
+
+        # Initialize base agent (template for sessions)
+        agent = ReActAgent.from_tools(
+            tools=tools,
+            llm=llm,
+            verbose=False,  # Disable verbose logging for performance
+            max_iterations=5,  # Reduced: most queries complete in 1-2 iterations
+            system_prompt=SYSTEM_PROMPT
+        )
+        logger.info("✓ ReActAgent initialized")
+
+        logger.info("=" * 60)
+        logger.info("OptimaX v4.0 Ready!")
+        logger.info(f"Architecture: Single LLM ({GROQ_MODEL})")
+        logger.info(f"Tools: {len(tools)} (SQL + Chart)")
+        logger.info("=" * 60)
+
+    except Exception as e:
+        logger.error(f"Startup failed: {str(e)}")
+        raise
+
+
+def get_or_create_session(session_id: str) -> Dict[str, Any]:
+    """Get existing session or create new one - reuses base agent for free tier optimization"""
+    global agent
+
+    if session_id not in sessions:
+        # Free tier optimization: reuse base agent instead of creating new LLM instances
+        # This saves on cold start times and token overhead
+        sessions[session_id] = {
+            "agent": agent,  # Reuse the global base agent
+            "created_at": datetime.now(),
+            "last_active": datetime.now(),
+            "message_count": 0
+        }
+
+        logger.info(f"Created new session (reusing base agent): {session_id}")
+
+    sessions[session_id]["last_active"] = datetime.now()
+    return sessions[session_id]
+
 
 @app.get("/")
 async def root():
-    return {"message": "OptimaX SQL Chat API is running"}
+    return {
+        "message": "OptimaX SQL Chat API v4.0",
+        "version": "4.0",
+        "architecture": "Single LLM (Groq) + LlamaIndex Tools",
+        "features": [
+            "SQL query execution",
+            "Chart recommendations",
+            "Session-based memory",
+            "Natural language interface"
+        ]
+    }
+
 
 @app.get("/health")
 async def health_check():
+    """Health check endpoint"""
     try:
-        with query_engine_instance.engine.connect() as conn:
-            result = conn.execute(text("SELECT 1"))
-            return {"status": "healthy", "database": "connected"}
+        if agent is None:
+            return {"status": "unhealthy", "error": "Agent not initialized"}
+
+        return {
+            "status": "healthy",
+            "version": "4.0",
+            "model": GROQ_MODEL,
+            "active_sessions": len(sessions)
+        }
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
 
-def format_sql_results(rows, columns):
-    """Format SQL results for display - simple and fast"""
-    if not rows:
-        return "No results found."
-
-    # Format header
-    header = " | ".join(columns) if len(columns) > 1 else columns[0]
-    separator = "-" * len(header)
-
-    formatted_data = [header, separator]
-
-    for i, row in enumerate(rows):
-        if len(row) == 2 and isinstance(row[1], (int, float)):
-            # Key-value pair with numeric value
-            formatted_data.append(f"{row[0]} | {row[1]:,}")
-        elif len(row) == 1:
-            # Single column result
-            value = row[0]
-            if isinstance(value, (int, float)) and value > 1000:
-                formatted_data.append(f"{value:,}")
-            else:
-                formatted_data.append(str(value))
-        else:
-            # Multi-column result
-            row_data = []
-            for col in row:
-                if isinstance(col, (int, float)) and col > 1000:
-                    row_data.append(f"{col:,}")
-                elif col is None:
-                    row_data.append("NULL")
-                else:
-                    row_data.append(str(col))
-            formatted_data.append(" | ".join(row_data))
-
-    # Limit display to prevent overwhelming frontend
-    if len(formatted_data) > 52:  # 50 data rows + header + separator
-        result_rows = formatted_data[:52]
-        result_rows.append(f"\n... and {len(rows) - 50} more rows")
-        return "\n".join(result_rows)
-    else:
-        return "\n".join(formatted_data)
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(message: ChatMessage):
+    """Main chat endpoint - compatible with frontend expectations"""
     start_time = datetime.now()
 
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Agent not initialized")
+
     try:
-        # Validate sql_model if provided
-        if message.sql_model and message.sql_model not in AVAILABLE_SQL_MODELS:
-            return ChatResponse(
-                response=f"Invalid model '{message.sql_model}'. Available models: {list(AVAILABLE_SQL_MODELS.keys())}",
-                error=f"Model '{message.sql_model}' not available",
-                execution_time=(datetime.now() - start_time).total_seconds()
-            )
+        # Get or create session
+        session_id = message.session_id or str(uuid.uuid4())
+        session = get_or_create_session(session_id)
+        session["message_count"] += 1
 
-        # Route the query using LLM (Phi-3 Mini only for intent classification)
-        try:
-            route = route_query_with_llm(message.message)
-            logger.info(f"Query routed to: {route}")
-        except RuntimeError as router_error:
-            logger.error(f"Router model not available: {str(router_error)}")
+        session_agent = session["agent"]
+
+        logger.info(f"Processing query [session={session_id}]: {message.message[:100]}...")
+
+        # Clear previous SQL result
+        clear_last_sql_result()
+
+        # Fast-path for greetings - bypass agent reasoning loop
+        user_msg_lower = message.message.lower().strip()
+        greeting_keywords = ['hi', 'hello', 'hey', 'yo', 'sup', 'greetings', 'good morning', 'good afternoon', 'good evening']
+        simple_queries = ['help', 'what can you do', 'who are you', 'thanks', 'thank you', 'okay', 'ok', 'cool']
+
+        is_greeting = (
+            any(user_msg_lower == keyword for keyword in greeting_keywords) or
+            any(user_msg_lower == keyword for keyword in simple_queries) or
+            (len(message.message.split()) <= 3 and any(keyword in user_msg_lower for keyword in greeting_keywords + simple_queries))
+        )
+
+        if is_greeting:
+            logger.info(f"Fast-path greeting detected: {message.message}")
+            execution_time = (datetime.now() - start_time).total_seconds()
+
+            greeting_response = """Hello! 👋 I'm **OptimaX** — your AI assistant for U.S. traffic accident data (2016–2023).
+
+I can help you:
+- 🔍 Generate SQL queries and analyze data
+- 📊 Visualize trends with automatic charts
+- 💡 Discover insights from 7.7 million accident records
+
+**Try asking:**
+- "Top 10 states by accident count"
+- "Show severe accidents during snow"
+- "Compare accidents by time of day"
+
+What would you like to explore?"""
+
             return ChatResponse(
-                response="Service unavailable: LLM models are required for operation. Please ensure Ollama is running with phi3:mini model.",
+                response=greeting_response,
+                session_id=session_id,
                 sql_query=None,
-                error=str(router_error),
-                execution_time=(datetime.now() - start_time).total_seconds()
+                query_results=None,
+                data=None,
+                execution_time=execution_time,
+                tasks=[] if not message.include_tasks else None,
+                clarification_needed=False,
+                agent_reasoning=None,
+                chart_recommendation=None,
+                error=None
             )
 
-        if route == "sql":
-            # Generate SQL using local Ollama models
-            sql_model = message.sql_model or DEFAULT_SQL_MODEL
-            include_sql = message.include_sql if message.include_sql is not None else (os.getenv("DEBUG") == "true")
+        # Execute query through agent with timeout (free tier optimization)
+        try:
+            response = await asyncio.wait_for(
+                session_agent.achat(message.message),
+                timeout=25  # Free tier: prevent hanging on busy Groq servers
+            )
+            response_text = str(response)
+        except asyncio.TimeoutError:
+            logger.warning(f"Query timeout for session {session_id}")
+            execution_time = (datetime.now() - start_time).total_seconds()
+            return ChatResponse(
+                response="Groq server seems busy or timed out. Please try again in a few seconds.",
+                session_id=session_id,
+                sql_query=None,
+                query_results=None,
+                data=None,
+                execution_time=execution_time,
+                error="Timeout"
+            )
 
-            try:
-                sql_query = query_engine_instance.generate_sql(
-                    question=message.message,
-                    model_name=sql_model,
-                    system_prompt=message.system_prompt
-                )
+        # Extract SQL and data from global storage (set by tools)
+        sql_query = None
+        data = None
+        chart_rec = None
 
-                logger.info(f"Generated SQL: {sql_query}")
+        last_result = get_last_sql_result()
+        if last_result and last_result.get('success'):
+            sql_query = last_result.get('sql')
+            data = last_result.get('data')
+            logger.info(f"Extracted SQL and {len(data) if data else 0} rows from tool execution")
 
-                # Validate SQL for safety and performance with row limit
-                row_limit = message.row_limit or 50
-                is_valid, validated_sql = query_engine_instance.validate_sql(sql_query, row_limit)
-                if not is_valid:
-                    return ChatResponse(
-                        response=f"Query validation failed: {validated_sql}",
-                        sql_query=None,
-                        error=validated_sql,
-                        model_used=sql_model,
-                        execution_time=(datetime.now() - start_time).total_seconds()
-                    )
+            # Auto-generate chart recommendation if data is suitable
+            if data and len(data) > 0:
+                from tools import ChartRecommender
+                columns = last_result.get('columns', [])
+                recommendation = ChartRecommender.recommend_chart(data, columns)
 
-                logger.info(f"Validated SQL: {validated_sql}")
+                # Only include recommendation if it's not "none" or "table"
+                if recommendation.get('chart_type') not in ['none', 'table']:
+                    chart_rec = recommendation
+                    logger.info(f"Auto-recommended chart: {recommendation.get('chart_type')}")
 
-                # Execute SQL with read-only approach
-                with query_engine_instance.engine.connect() as conn:
-                    result = conn.execute(text(validated_sql))
-                    rows = result.fetchall()
-                    columns = list(result.keys())
+        execution_time = (datetime.now() - start_time).total_seconds()
 
-                # Return formatted text for display
-                formatted_result = format_sql_results(rows, columns)
+        logger.info(f"Response generated in {execution_time:.2f}s")
 
-                # Convert rows to list of dicts for chart visualization
-                query_results = [dict(row._mapping) for row in rows] if rows else []
-
-                print(f"\n=== BACKEND CHART DEBUG ===")
-                print(f"Query results count: {len(query_results)}")
-                print(f"First row: {query_results[0] if query_results else 'None'}")
-                print(f"Sending query_results to frontend: {query_results is not None}")
-                print(f"========================\n")
-
-                return ChatResponse(
-                    response=formatted_result,
-                    sql_query=validated_sql if include_sql else None,
-                    query_results=query_results,
-                    model_used=sql_model,
-                    execution_time=(datetime.now() - start_time).total_seconds()
-                )
-
-            except Exception as sql_error:
-                logger.error(f"SQL generation/execution failed: {str(sql_error)}")
-                return ChatResponse(
-                    response=f"SQL generation failed: {str(sql_error)}. Please try rephrasing your question.",
-                    sql_query=None,
-                    error=str(sql_error),
-                    execution_time=(datetime.now() - start_time).total_seconds()
-                )
-
-        else:  # general chat
-            try:
-                chat_response = generate_chat_response(message.message)
-                return ChatResponse(
-                    response=chat_response,
-                    execution_time=(datetime.now() - start_time).total_seconds()
-                )
-            except RuntimeError as chat_error:
-                logger.error(f"Chat response generation failed: {str(chat_error)}")
-                return ChatResponse(
-                    response="Service unavailable: LLM models are required for chat responses. Please ensure Ollama is running with phi3:mini model.",
-                    sql_query=None,
-                    error=str(chat_error),
-                    execution_time=(datetime.now() - start_time).total_seconds()
-                )
+        # Return in format frontend expects
+        return ChatResponse(
+            response=response_text,
+            session_id=session_id,
+            sql_query=sql_query,
+            query_results=data,  # Frontend expects 'query_results'
+            data=data,
+            execution_time=execution_time,
+            tasks=[] if not message.include_tasks else None,
+            clarification_needed=False,
+            agent_reasoning=None,
+            chart_recommendation=chart_rec,
+            error=None
+        )
 
     except Exception as e:
-        logger.error(f"Error processing chat request: {str(e)}")
+        logger.error(f"Error processing chat: {str(e)}")
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        # Free tier friendly error message
+        error_msg = "Groq server seems busy or encountered an error. Please try again in a few seconds."
+        if "429" in str(e) or "rate limit" in str(e).lower():
+            error_msg = "Rate limit reached. Please wait a moment before trying again."
+
         return ChatResponse(
-            response="An unexpected error occurred while processing your request. Please try again.",
+            response=error_msg,
+            session_id=session_id or str(uuid.uuid4()),
             sql_query=None,
-            error=str(e),
-            execution_time=(datetime.now() - start_time).total_seconds()
+            query_results=None,
+            data=None,
+            execution_time=execution_time,
+            error=str(e)
         )
+
+
+@app.get("/sessions")
+async def list_sessions():
+    """List all active sessions"""
+    session_list = []
+    for sid, session in sessions.items():
+        session_list.append({
+            "session_id": sid,
+            "created_at": session["created_at"].isoformat(),
+            "last_active": session["last_active"].isoformat(),
+            "message_count": session["message_count"]
+        })
+
+    return {
+        "total_sessions": len(session_list),
+        "sessions": session_list
+    }
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Delete a session"""
+    if session_id in sessions:
+        del sessions[session_id]
+        return {"message": f"Session {session_id} deleted"}
+    else:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.get("/models")
+async def get_models():
+    """Get model information"""
+    return {
+        "model": GROQ_MODEL,
+        "provider": "Groq",
+        "architecture": "Single LLM for all tasks",
+        "version": "4.0"
+    }
+
 
 @app.get("/table-info")
 async def get_table_info():
-    """Get table schema and metadata information"""
+    """Get database table information"""
+    if db_manager is None:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
     try:
-        with query_engine_instance.engine.connect() as conn:
-            result = conn.execute(text("""
-                SELECT column_name, data_type, is_nullable
-                FROM information_schema.columns
-                WHERE table_name = 'us_accidents'
-                ORDER BY ordinal_position
-            """))
-            columns = [{"name": row[0], "type": row[1], "nullable": row[2]} for row in result]
-
-            count_result = conn.execute(text("SELECT COUNT(*) FROM us_accidents"))
-            total_records = count_result.scalar()
-
-            return {
-                "table": "us_accidents",
-                "columns": columns,
-                "total_records": total_records
-            }
+        schema = db_manager.get_schema_text()
+        return {
+            "schema": schema,
+            "table": "us_accidents",
+            "total_records": "7.7M+"
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/models")
-async def get_available_models():
-    """Get list of available SQL generation models"""
-    try:
-        # Check what models are actually available in Ollama
-        ollama_url = f"{os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')}/api/tags"
-        response = requests.get(ollama_url, timeout=5)
-        response.raise_for_status()
 
-        ollama_models = response.json()
-        available_models = [model["name"] for model in ollama_models.get("models", [])]
-
-        models_status = {}
-        for model_name in AVAILABLE_SQL_MODELS.keys():
-            models_status[model_name] = model_name in available_models
-
-        return {
-            "available_models": AVAILABLE_SQL_MODELS,
-            "default_model": DEFAULT_SQL_MODEL,
-            "intent_model": INTENT_MODEL,
-            "ollama_models": available_models,
-            "models_status": models_status,
-            "local_setup": True
-        }
-    except Exception as e:
-        logger.error(f"Failed to check Ollama models: {str(e)}")
-        return {
-            "available_models": AVAILABLE_SQL_MODELS,
-            "default_model": DEFAULT_SQL_MODEL,
-            "intent_model": INTENT_MODEL,
-            "error": f"Could not connect to Ollama: {str(e)}",
-            "local_setup": True
-        }
-
-@app.get("/health/models")
-async def check_model_health():
-    """Check health of local Ollama models and database"""
-    health_status = {
-        "ollama_service": "unhealthy",
-        "intent_model": "unhealthy",
-        "sql_models": "unhealthy",
-        "database": "unhealthy"
-    }
-
-    # Check Ollama service
-    try:
-        ollama_url = f"{os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')}/api/tags"
-        response = requests.get(ollama_url, timeout=5)
-        response.raise_for_status()
-
-        models_data = response.json()
-        available_models = [model["name"] for model in models_data.get("models", [])]
-        health_status["ollama_service"] = "healthy"
-
-        # Check specific models
-        health_status["intent_model"] = "healthy" if INTENT_MODEL in available_models else "missing"
-
-        sql_models_available = any(model in available_models for model in AVAILABLE_SQL_MODELS.keys())
-        health_status["sql_models"] = "healthy" if sql_models_available else "missing"
-
-    except Exception as e:
-        logger.error(f"Ollama service health check failed: {str(e)}")
-
-    # Check database
-    try:
-        with query_engine_instance.engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-            health_status["database"] = "healthy"
-    except Exception as e:
-        logger.error(f"Database health check failed: {str(e)}")
-
-    overall_healthy = all(status == "healthy" for status in health_status.values())
+@app.get("/performance")
+async def get_performance():
+    """Get performance metrics (for frontend compatibility)"""
+    total_sessions = len(sessions)
+    total_messages = sum(s["message_count"] for s in sessions.values())
 
     return {
-        "status": "healthy" if overall_healthy else "degraded",
-        "components": health_status,
-        "setup": "local_ollama"
+        "total_requests": total_messages,
+        "active_sessions": total_sessions,
+        "total_sessions_created": total_sessions,
+        "avg_tasks_per_query": 1.0,
+        "clarification_requests": 0,
+        "clarification_rate": 0.0,
+        "multi_step_queries": 0
     }
 
-@app.get("/system-prompts", response_model=SystemPromptsResponse)
-async def get_system_prompts():
-    """Get current and default system prompts for both models"""
-    return SystemPromptsResponse(
-        intent_prompt=current_intent_prompt,
-        sql_prompt=current_sql_prompt,
-        default_intent_prompt=DEFAULT_INTENT_PROMPT,
-        default_sql_prompt=DEFAULT_SQL_PROMPT
-    )
 
-@app.post("/system-prompts")
-async def update_system_prompt(prompt_update: SystemPromptUpdate):
-    """Update system prompt for a specific model"""
-    global current_intent_prompt, current_sql_prompt
-
-    if prompt_update.model_type == "intent":
-        current_intent_prompt = prompt_update.prompt
-        return {"message": "Intent model prompt updated successfully", "model_type": "intent"}
-    elif prompt_update.model_type == "sql":
-        current_sql_prompt = prompt_update.prompt
-        return {"message": "SQL model prompt updated successfully", "model_type": "sql"}
-    else:
-        raise HTTPException(status_code=400, detail="Invalid model_type. Must be 'intent' or 'sql'")
-
-@app.post("/system-prompts/reset")
-async def reset_system_prompts():
-    """Reset all system prompts to defaults"""
-    global current_intent_prompt, current_sql_prompt
-
-    current_intent_prompt = DEFAULT_INTENT_PROMPT
-    current_sql_prompt = DEFAULT_SQL_PROMPT
+@app.get("/agent/info")
+async def get_agent_info():
+    """Get agent information (for frontend compatibility)"""
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Agent not initialized")
 
     return {
-        "message": "All system prompts reset to defaults",
-        "reset_models": ["intent", "sql"]
+        "agent_type": "LlamaIndex ReActAgent",
+        "agent_model": GROQ_MODEL,
+        "tools": ["execute_sql", "get_schema", "recommend_chart"],
+        "features": {
+            "multi_turn_memory": True,
+            "single_llm_architecture": True,
+            "session_management": True
+        },
+        "version": "4.0"
     }
 
-@app.post("/system-prompts/reset/{model_type}")
-async def reset_specific_system_prompt(model_type: str):
-    """Reset system prompt for a specific model to default"""
-    global current_intent_prompt, current_sql_prompt
-
-    if model_type == "intent":
-        current_intent_prompt = DEFAULT_INTENT_PROMPT
-        return {"message": "Intent model prompt reset to default", "model_type": "intent"}
-    elif model_type == "sql":
-        current_sql_prompt = DEFAULT_SQL_PROMPT
-        return {"message": "SQL model prompt reset to default", "model_type": "sql"}
-    else:
-        raise HTTPException(status_code=400, detail="Invalid model_type. Must be 'intent' or 'sql'")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8002)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

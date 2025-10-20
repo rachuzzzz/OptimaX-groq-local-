@@ -11,9 +11,15 @@ export class ChartDetectionService {
 
   /**
    * Determines if a SQL query result should be visualized
+   * Only visualizes if user explicitly requests it
    */
-  shouldVisualize(query: string, results: any[]): boolean {
+  shouldVisualize(query: string, results: any[], userMessage?: string): boolean {
     if (!results || results.length === 0) {
+      return false;
+    }
+
+    // Check if user explicitly requested visualization
+    if (!userMessage || !this.hasVisualizationIntent(userMessage)) {
       return false;
     }
 
@@ -28,6 +34,21 @@ export class ChartDetectionService {
     // 2. Has GROUP BY clause OR
     // 3. Has exactly 2 columns (label + value pattern)
     return (hasAggregation || hasGroupBy) && columnCount >= 2 && columnCount <= 4;
+  }
+
+  /**
+   * Checks if user message contains visualization intent keywords
+   */
+  private hasVisualizationIntent(userMessage: string): boolean {
+    const visualizationKeywords = [
+      'chart', 'graph', 'plot', 'visualize', 'visualization',
+      'show me a chart', 'show me a graph', 'draw', 'display chart',
+      'display graph', 'bar chart', 'line chart', 'pie chart',
+      'doughnut chart', 'show visually', 'visual representation'
+    ];
+
+    const messageLower = userMessage.toLowerCase();
+    return visualizationKeywords.some(keyword => messageLower.includes(keyword));
   }
 
   /**

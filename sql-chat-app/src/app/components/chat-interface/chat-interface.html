@@ -399,9 +399,17 @@
               </div>
             </div>
 
+            <!-- Clarification messages (display as regular AI response) -->
+            <div *ngIf="message.type === 'clarification'" class="ai-response-container">
+              <pre class="message-text sql-response">{{ message.content }}</pre>
+            </div>
+
             <!-- AI messages with table rendering -->
             <div *ngIf="message.type === 'ai'" class="ai-response-container">
-              <!-- Table view for structured data -->
+              <!-- Always show text response first -->
+              <pre class="message-text sql-response">{{ message.content }}</pre>
+
+              <!-- Table view for structured data (shown below text) -->
               <div *ngIf="message.queryResults && message.queryResults.length > 0 && !message.error"
                    class="data-table-container">
                 <div class="table-wrapper">
@@ -424,10 +432,6 @@
                   Showing {{ message.queryResults.length }} row{{ message.queryResults.length !== 1 ? 's' : '' }}
                 </div>
               </div>
-
-              <!-- Fallback to text response if no query results -->
-              <pre *ngIf="!message.queryResults || message.queryResults.length === 0 || message.error"
-                   class="message-text sql-response">{{ message.content }}</pre>
             </div>
 
             <!-- Chart Visualization -->
