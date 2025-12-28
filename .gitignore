@@ -27,3 +27,21 @@ npm-debug.log*
 # Model cache
 sql-chat-backend/models/
 sql-chat-backend/.cache/
+
+# Database files (large SQL dumps)
+*.sql
+*.zip
+__MACOSX/
+
+# Temporary documentation (session notes)
+CHART_SNIPPET_SYSTEM.md
+DYNAMIC_SCHEMA_FEATURE.md
+FEATURE_SUMMARY.md
+FIX_MAX_ITERATIONS_ERROR.md
+IMPLEMENTATION_COMPLIANCE_REPORT.md
+NEW_WORKFLOW.md
+POSTGRES_AIR_MIGRATION.md
+SYSTEM_PROMPT_MANAGEMENT.md
+
+# Custom system prompt (backend manages this)
+sql-chat-backend/custom_system_prompt.txt

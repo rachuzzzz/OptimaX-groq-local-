@@ -10,47 +10,50 @@
     </div>
 
     <div class="chart-controls">
-      <button class="chart-type-btn"
-              [class.active]="currentType === 'bar'"
-              (click)="changeChartType('bar')"
-              title="Bar Chart">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="18" y1="20" x2="18" y2="10"/>
-          <line x1="12" y1="20" x2="12" y2="4"/>
-          <line x1="6" y1="20" x2="6" y2="14"/>
-        </svg>
-      </button>
+      <!-- Chart type switching buttons - only show if allowed -->
+      <ng-container *ngIf="allowChartTypeSwitch">
+        <button class="chart-type-btn"
+                [class.active]="currentType === 'bar'"
+                (click)="changeChartType('bar')"
+                title="Bar Chart">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="20" x2="18" y2="10"/>
+            <line x1="12" y1="20" x2="12" y2="4"/>
+            <line x1="6" y1="20" x2="6" y2="14"/>
+          </svg>
+        </button>
 
-      <button class="chart-type-btn"
-              [class.active]="currentType === 'line'"
-              (click)="changeChartType('line')"
-              title="Line Chart">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-        </svg>
-      </button>
+        <button class="chart-type-btn"
+                [class.active]="currentType === 'line'"
+                (click)="changeChartType('line')"
+                title="Line Chart">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+          </svg>
+        </button>
 
-      <button class="chart-type-btn"
-              [class.active]="currentType === 'pie'"
-              (click)="changeChartType('pie')"
-              title="Pie Chart">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M21.21 15.89A10 10 0 1 1 8 2.83"/>
-          <path d="M22 12A10 10 0 0 0 12 2v10z"/>
-        </svg>
-      </button>
+        <button class="chart-type-btn"
+                [class.active]="currentType === 'pie'"
+                (click)="changeChartType('pie')"
+                title="Pie Chart">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21.21 15.89A10 10 0 1 1 8 2.83"/>
+            <path d="M22 12A10 10 0 0 0 12 2v10z"/>
+          </svg>
+        </button>
 
-      <button class="chart-type-btn"
-              [class.active]="currentType === 'doughnut'"
-              (click)="changeChartType('doughnut')"
-              title="Doughnut Chart">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="10"/>
-          <circle cx="12" cy="12" r="4"/>
-        </svg>
-      </button>
+        <button class="chart-type-btn"
+                [class.active]="currentType === 'doughnut'"
+                (click)="changeChartType('doughnut')"
+                title="Doughnut Chart">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <circle cx="12" cy="12" r="4"/>
+          </svg>
+        </button>
 
-      <div class="divider"></div>
+        <div class="divider"></div>
+      </ng-container>
 
       <button class="zoom-btn" (click)="zoomIn()" title="Zoom In" *ngIf="currentType !== 'pie' && currentType !== 'doughnut'">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

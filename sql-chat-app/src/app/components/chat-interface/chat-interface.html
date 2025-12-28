@@ -69,14 +69,23 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0H5a2 2 0 0 1-2-2v-4m6 6h10a2 2 0 0 1 2-2v-4"/>
           </svg>
-          <span>Table Schema</span>
+          <span>Table Schema ({{ tableCount }})</span>
+        </div>
+        <div class="sidebar-item" (click)="openDatabaseSettings()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <ellipse cx="12" cy="5" rx="9" ry="3"/>
+            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+          </svg>
+          <span>Connection Settings</span>
         </div>
         <div class="sidebar-item" (click)="showConnectionStatus()">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M18 11.034C18.817 8.797 20.731 7 23 7c3.314 0 6 2.686 6 6s-2.686 6-6 6c-2.269 0-4.183-1.797-5-4.034"/>
-            <path d="M6 11.034C5.183 8.797 3.269 7 1 7C-2.314 7-5 9.686-5 13s2.686 6 6 6c2.269 0 4.183-1.797 5-4.034"/>
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M12 1v6m0 6v6"/>
           </svg>
-          <span>Connection</span>
+          <span>Status</span>
+          <div class="status-dot" [class.connected]="backendConnected"></div>
         </div>
       </div>
 
@@ -434,6 +443,25 @@
               </div>
             </div>
 
+            <!-- Chart Suggestion Buttons (LLM suggests, user picks) -->
+            <div *ngIf="message.chartSuggestion && message.awaitingChartChoice" class="chart-suggestion-container">
+              <div class="chart-suggestion-header">
+                <h4>📊 Visualization Options</h4>
+                <p class="analysis-type">Analysis Type: <strong>{{ message.chartSuggestion.analysis_type }}</strong></p>
+              </div>
+              <div class="chart-options">
+                <button
+                  *ngFor="let option of message.chartSuggestion.recommended_charts; let i = index"
+                  class="chart-option-btn"
+                  [class.recommended]="option.recommended"
+                  (click)="selectChartType(option.type, messages.indexOf(message))">
+                  <span class="option-number">Option {{ i + 1 }}</span>
+                  <span class="chart-label">{{ option.label }}</span>
+                  <span class="recommended-badge" *ngIf="option.recommended">⭐ Recommended</span>
+                </button>
+              </div>
+            </div>
+
             <!-- Chart Visualization -->
             <app-chart-visualization
               *ngIf="message.showChart && message.chartData"
@@ -539,6 +567,92 @@
     </div>
     <div class="manager-modal-content">
       <app-system-prompt-manager></app-system-prompt-manager>
+    </div>
+  </div>
+</div>
+
+<!-- Database Settings Modal -->
+<div class="modal-overlay" *ngIf="showDatabaseSettings" (click)="closeDatabaseSettings()">
+  <div class="modal-content database-settings-modal" (click)="$event.stopPropagation()">
+    <div class="modal-header">
+      <h3>Database Connection Settings</h3>
+      <button class="close-button" (click)="closeDatabaseSettings()">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
+    </div>
+
+    <div class="modal-body">
+      <div class="info-box">
+        <p><strong>ℹ️ Note:</strong> Changing the database connection requires restarting the backend with the new DATABASE_URL environment variable.</p>
+        <p>The backend will need to be restarted manually with the new connection string.</p>
+      </div>
+
+      <div class="current-connection">
+        <h4>Current Database</h4>
+        <div class="connection-info">
+          <div class="info-row">
+            <span class="label">Tables:</span>
+            <span class="value">{{ tableCount }}</span>
+          </div>
+          <div class="info-row">
+            <span class="label">Status:</span>
+            <span class="value" [class.connected]="backendConnected">
+              {{ backendConnected ? 'Connected' : 'Disconnected' }}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="schema-viewer" *ngIf="databaseSchema">
+        <h4>Database Schema</h4>
+        <div class="schema-list">
+          <div class="schema-table" *ngFor="let table of databaseSchema.tables">
+            <div class="table-header" (click)="toggleTableExpand(table.name)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path [attr.d]="expandedTables[table.name] ? 'M19 9l-7 7-7-7' : 'M9 18l6-6-6-6'"/>
+              </svg>
+              <span class="table-name">{{ table.name }}</span>
+              <span class="column-count">({{ table.column_count }} columns)</span>
+            </div>
+            <div class="table-columns" *ngIf="expandedTables[table.name]">
+              <div class="column-item" *ngFor="let col of table.columns">
+                <span class="col-name">{{ col.name }}</span>
+                <span class="col-type">{{ col.type }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="connection-test">
+        <h4>Test New Connection</h4>
+        <p class="help-text">Enter a PostgreSQL connection URL to test:</p>
+        <input
+          type="text"
+          [(ngModel)]="testConnectionUrl"
+          placeholder="postgresql://user:password@localhost:5432/database"
+          class="connection-input">
+        <button
+          class="btn-test"
+          (click)="testConnection()"
+          [disabled]="isTestingConnection">
+          {{ isTestingConnection ? 'Testing...' : 'Test Connection' }}
+        </button>
+        <div class="test-result" *ngIf="connectionTestResult">
+          <div class="result-box" [class.success]="connectionTestResult.success" [class.error]="!connectionTestResult.success">
+            <p *ngIf="connectionTestResult.success">
+              ✅ Connection successful!<br>
+              Found {{ connectionTestResult.table_count }} tables in schemas: {{ connectionTestResult.schemas?.join(', ') }}
+            </p>
+            <p *ngIf="!connectionTestResult.success">
+              ❌ Connection failed: {{ connectionTestResult.error }}
+            </p>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>

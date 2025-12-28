@@ -27,6 +27,7 @@ export interface ChartData {
 export class ChartVisualizationComponent implements AfterViewInit {
   @Input() chartData!: ChartData;
   @Input() chartType: ChartType = 'bar';
+  @Input() allowChartTypeSwitch: boolean = false; // Hide chart type buttons by default
   @ViewChild('chartCanvas', { static: false }) chartCanvas!: ElementRef<HTMLCanvasElement>;
 
   chart: Chart | null = null;

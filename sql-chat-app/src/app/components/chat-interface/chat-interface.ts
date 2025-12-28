@@ -21,6 +21,8 @@ interface Message {
   clarificationNeeded?: boolean;
   agentReasoning?: string;
   sessionId?: string;
+  chartSuggestion?: any;  // LLM suggested chart types
+  awaitingChartChoice?: boolean;  // Waiting for user to pick chart type
 }
 
 interface DebugLog {
@@ -66,68 +68,66 @@ interface SQLQueryEntry {
 })
 export class ChatInterfaceComponent implements OnInit {
   // System prompt - default prompt defined first
-  private defaultSystemPrompt = `You are OptimaX, an expert SQL query generator and data analyst. Convert natural language questions into PostgreSQL queries and present results in a clear, formatted manner.
+  private defaultSystemPrompt = `You are OptimaX, an expert SQL query generator and data analyst. Convert natural language questions into PostgreSQL queries for airline data and present results in a clear, formatted manner.
 
-DATABASE SCHEMA - us_accidents table (7,728,394 records):
-- id VARCHAR(10) PRIMARY KEY
-- source VARCHAR(10)
-- severity INTEGER (1=low, 2=minor, 3=major, 4=severe)
-- start_time TIMESTAMP, end_time TIMESTAMP  
-- start_lat DECIMAL(10,8), start_lng DECIMAL(11,8), end_lat DECIMAL(10,8), end_lng DECIMAL(11,8)
-- distance_mi DECIMAL(8,3)
-- description TEXT
-- street VARCHAR(200), city VARCHAR(100), county VARCHAR(100), state VARCHAR(2), zipcode VARCHAR(10)
-- country VARCHAR(2), timezone VARCHAR(50), airport_code VARCHAR(10)
-- weather_timestamp TIMESTAMP
-- temperature_f DECIMAL(8,2), wind_chill_f DECIMAL(8,2), humidity_pct DECIMAL(8,2)
-- pressure_in DECIMAL(8,2), visibility_mi DECIMAL(8,2), wind_direction VARCHAR(10)
-- wind_speed_mph DECIMAL(8,2), precipitation_in DECIMAL(8,3), weather_condition VARCHAR(100)
-- amenity BOOLEAN, bump BOOLEAN, crossing BOOLEAN, give_way BOOLEAN, junction BOOLEAN
-- no_exit BOOLEAN, railway BOOLEAN, roundabout BOOLEAN, station BOOLEAN, stop BOOLEAN
-- traffic_calming BOOLEAN, traffic_signal BOOLEAN, turning_loop BOOLEAN
-- sunrise_sunset VARCHAR(10), civil_twilight VARCHAR(10), nautical_twilight VARCHAR(10), astronomical_twilight VARCHAR(10)
+DATABASE SCHEMA - postgres_air (airline booking and flight data):
 
-INDEXES available: state, city, start_time, severity, (start_lat, start_lng)
+TABLES:
+- postgres_air.flight: flight_id, flight_no, scheduled_departure, scheduled_arrival, departure_airport, arrival_airport, status, aircraft_code, actual_departure, actual_arrival, update_ts
+- postgres_air.booking: booking_id, booking_ref, booking_name, account_id, email, phone, price, update_ts
+- postgres_air.passenger: passenger_id, booking_id, first_name, last_name, age, account_id, update_ts
+- postgres_air.airport: airport_code, airport_name, city, airport_tz, continent, iso_country, iso_region, intnl, update_ts
+- postgres_air.aircraft: code, model, range, class, velocity
+- postgres_air.boarding_pass: pass_id, passenger_id, booking_leg_id, seat, boarding_time, precheck, update_ts
+- postgres_air.booking_leg: booking_leg_id, booking_id, flight_id, leg_num, is_returning, update_ts
+- postgres_air.account: account_id, login, first_name, last_name, update_ts
+- postgres_air.phone: phone_id, account_id, phone, phone_type, primary_phone, update_ts
+- postgres_air.frequent_flyer: frequent_flyer_id, account_id, airline, level, update_ts
+
+KEY FIELDS:
+- Airport codes: 3-letter codes (JFK, LAX, ORD, etc.)
+- Timestamps: scheduled_departure, scheduled_arrival, actual_departure, actual_arrival (with time zone)
+- Status: scheduled, departed, arrived, cancelled, delayed
+- Price: numeric(7,2)
+- Schema: ALWAYS prefix with postgres_air.
 
 RESPONSE FORMAT RULES:
 1. Always show the actual SQL query used
 2. Present results in a clear, numbered list format
-3. Include exact numbers with comma separators (e.g., 1,741,433)
+3. Include exact numbers with comma separators
 4. Use proper headings and formatting
 5. Provide context and insights about the data
 
 EXAMPLE RESPONSE FORMAT:
 **SQL Query:**
 \`\`\`sql
-SELECT state, COUNT(*) as accident_count 
-FROM us_accidents 
-GROUP BY state 
-ORDER BY accident_count DESC 
+SELECT departure_airport, arrival_airport, COUNT(*) as flight_count
+FROM postgres_air.flight
+GROUP BY departure_airport, arrival_airport
+ORDER BY flight_count DESC
 LIMIT 10;
 \`\`\`
 
-**Top 10 States with Most Accidents:**
-1. **California (CA)** - 1,741,433 accidents
-2. **Florida (FL)** - 880,192 accidents
-3. **Texas (TX)** - 582,837 accidents
+**Top 10 Routes by Flight Count:**
+1. **JFK → LAX** - 1,234 flights
+2. **LAX → JFK** - 1,198 flights
 [continue numbered list...]
 
-**Analysis:** California leads significantly with over 1.7 million recorded accidents...
+**Analysis:** The JFK-LAX route is the busiest with over 1,200 flights in each direction...
 
 SQL GENERATION RULES:
 1. Generate ONLY valid PostgreSQL syntax
-2. Use proper column names exactly as shown above
-3. For location queries, use start_lat/start_lng coordinates
-4. For time queries, use start_time column
-5. Boolean columns: use TRUE/FALSE
-6. Always include LIMIT for large result sets
-7. Use appropriate WHERE clauses for performance
+2. ALWAYS use schema prefix: postgres_air.table_name
+3. Use proper column names exactly as shown above
+4. For time queries, use scheduled_departure, scheduled_arrival
+5. Always include LIMIT for large result sets
+6. Use appropriate WHERE clauses for performance
 
 Example patterns:
-- "accidents in California" → WHERE state = 'CA'
-- "severe accidents" → WHERE severity = 4
-- "accidents during snow" → WHERE weather_condition ILIKE '%snow%'
-- "accidents near traffic signals" → WHERE traffic_signal = TRUE`;
+- "flights from JFK" → WHERE departure_airport = 'JFK'
+- "delayed flights" → WHERE status = 'delayed'
+- "bookings in December" → WHERE EXTRACT(MONTH FROM update_ts) = 12
+- "average booking price" → SELECT AVG(price) FROM postgres_air.booking`;
 
   systemPrompt: string = this.defaultSystemPrompt;
 
@@ -169,6 +169,15 @@ Example patterns:
 
   // Table information
   tableInfo: TableInfo | null = null;
+  tableCount: number = 0;
+
+  // Database settings
+  showDatabaseSettings: boolean = false;
+  databaseSchema: any = null;
+  expandedTables: { [key: string]: boolean } = {};
+  testConnectionUrl: string = '';
+  isTestingConnection: boolean = false;
+  connectionTestResult: any = null;
 
   // SQL Query tracking for debugging
   sqlQueryHistory: SQLQueryEntry[] = [];
@@ -177,12 +186,22 @@ Example patterns:
   // Time-based greeting
   greeting: string = '';
 
+  // Cache for last chart recommendation (for zero-overhead visualize commands)
+  lastChartRecommendation: {
+    chartData?: ChartData;
+    queryResults?: any[];
+    sqlQuery?: string;
+    timestamp: Date;
+    chartSuggestion?: any;
+  } | null = null;
+
   examplePrompts = [
-    'Show me the top 10 states with most accidents',
-    'Find severe accidents during snow weather',
-    'What times of day have the most accidents?',
-    'Show accidents near traffic signals in California',
-    'Which weather conditions cause the most accidents?'
+    'Show me the top 10 busiest flight routes',
+    'What are the most popular departure airports?',
+    'Find all flights from JFK to LAX',
+    'Show me the average booking price',
+    'Which airports have international flights?',
+    'How many passengers are there in the database?'
   ];
 
   constructor(
@@ -197,15 +216,25 @@ Example patterns:
   }
 
   ngOnInit(): void {
+    // Load custom system prompt from localStorage if available
+    this.loadSystemPromptFromStorage();
+
     this.originalSystemPrompt = this.systemPrompt;
     this.addDebugLog('info', 'OptimaX Developer Console initialized');
     this.addDebugLog('info', `Running in ${this.agenticMode ? 'Agentic' : 'Optimized'} mode`);
+
+    if (this.isUsingCustomPrompt) {
+      this.addDebugLog('info', 'Using custom system prompt');
+    }
 
     // Load or create session
     this.initializeSession();
 
     // Initialize the application with loading screen
     this.initializeApp();
+
+    // Load database schema
+    this.loadDatabaseSchema();
 
     // Listen for test prompt events from system prompt manager
     document.addEventListener('testPrompt', (event: any) => {
@@ -219,6 +248,12 @@ Example patterns:
     // Listen for close system prompt manager events
     document.addEventListener('closeSystemPromptManager', () => {
       this.closeSystemPromptManager();
+    });
+
+    // Listen for prompt changes from system prompt manager
+    document.addEventListener('systemPromptChanged', (event: any) => {
+      this.loadSystemPromptFromStorage();
+      this.addDebugLog('info', 'System prompt updated');
     });
   }
 
@@ -257,6 +292,48 @@ Example patterns:
     if (this.userInput.trim() && !this.isLoading) {
       const userMessage = this.userInput.trim();
       const queryStartTime = Date.now();
+
+      // Check if this is a visualization command
+      // NOTE: We ONLY instant-replay if we already have an LLM-generated chart
+      // Otherwise, always go to backend to let LLM reason about chart type
+      const visualizeKeywords = ['visualize', 'vizualize', 'show as chart', 'plot', 'show chart', 'display chart', 'pictorially'];
+      const isVisualizeCommand = visualizeKeywords.some(keyword =>
+        userMessage.toLowerCase().includes(keyword)
+      );
+
+      // If user wants to visualize and we ALREADY have an LLM-generated chart cached, replay it instantly
+      if (isVisualizeCommand && this.lastChartRecommendation && this.lastChartRecommendation.chartData) {
+        this.addDebugLog('info', '⚡ Instant replay of LLM-generated chart (zero backend calls)');
+
+        // Add user message
+        this.messages.push({
+          type: 'user',
+          content: userMessage,
+          timestamp: new Date()
+        });
+
+        // Add AI response with cached LLM chart
+        this.messages.push({
+          type: 'ai',
+          content: `Here's the visualization from my previous analysis:`,
+          timestamp: new Date(),
+          chartData: this.lastChartRecommendation.chartData,
+          showChart: true,
+          queryResults: this.lastChartRecommendation.queryResults,
+          sqlQuery: this.lastChartRecommendation.sqlQuery,
+          responseTime: 0 // Instant!
+        });
+
+        this.userInput = '';
+        return; // Skip backend call - chart already generated by LLM
+      }
+
+      // If user asks for visualization but no chart cached, ALWAYS go to backend
+      // Let the LLM reason about chart type from scratch
+      if (isVisualizeCommand) {
+        this.addDebugLog('info', '→ Sending to LLM for chart reasoning (pure AI decision)');
+        // Continue to backend call below - LLM will analyze data and choose chart type
+      }
 
       // Add to recent queries
       this.recentQueries = this.recentQueries.filter(q => q !== userMessage);
@@ -325,65 +402,43 @@ Example patterns:
           // Remove thinking indicator
           this.messages = this.messages.filter(msg => msg.type !== 'thinking');
 
-          // Detect if results should be visualized
+          // LLM CHART SUGGESTION SYSTEM - User chooses chart type
           let chartData: ChartData | undefined;
           let showChart = false;
+          let chartSuggestion: any = undefined;
+          let awaitingChartChoice = false;
 
-          console.log('=== CHART DETECTION DEBUG ===');
-          console.log('Has sql_query:', !!response.sql_query);
-          console.log('Has query_results:', !!response.query_results);
-          console.log('Has chart_recommendation:', !!response.chart_recommendation);
-          console.log('Query results length:', response.query_results?.length);
-          console.log('Chart recommendation:', response.chart_recommendation);
+          // Check if LLM provided chart suggestions (not rendered yet - waiting for user choice)
+          if (response.chart_suggestion &&
+              response.chart_suggestion.recommended_charts &&
+              response.chart_suggestion.recommended_charts.length > 0) {
 
-          // Primary: Use backend chart recommendation if available
-          if (response.chart_recommendation &&
-              response.chart_recommendation.chart_type &&
-              response.chart_recommendation.chart_type !== 'none' &&
-              response.chart_recommendation.chart_type !== 'table' &&
-              response.query_results &&
-              response.query_results.length > 0) {
+            this.addDebugLog('info', `✓ LLM suggested chart types: ${response.chart_suggestion.analysis_type}`);
 
-            const chartType = response.chart_recommendation.chart_type as any;
-            console.log('Using BACKEND chart recommendation:', chartType);
+            // Store suggestions for user to choose from
+            chartSuggestion = response.chart_suggestion;
+            awaitingChartChoice = true;
 
-            chartData = this.chartDetectionService.parseToChartData(
-              response.query_results,
-              chartType
-            );
-            console.log('Chart data from backend recommendation:', chartData);
+            // Cache the data and suggestion for when user picks
+            this.lastChartRecommendation = {
+              chartData: undefined, // No chart rendered yet
+              queryResults: response.query_results,
+              sqlQuery: response.sql_query,
+              timestamp: new Date(),
+              chartSuggestion: chartSuggestion
+            };
 
-            showChart = true;
-            this.addDebugLog('info', `Backend recommended chart: ${chartType} - ${response.chart_recommendation.reasoning}`);
-          }
-          // Fallback: Use frontend detection if user explicitly requested visualization
-          else if (response.sql_query && response.query_results && response.query_results.length > 0) {
-            const shouldViz = this.chartDetectionService.shouldVisualize(
-              response.sql_query,
-              response.query_results,
-              userMessage  // Pass user message to check for visualization intent
-            );
+            this.addDebugLog('info', `Awaiting user choice from ${chartSuggestion.recommended_charts.length} options`);
 
-            console.log('Fallback: Frontend should visualize:', shouldViz);
-
-            if (shouldViz) {
-              const chartType = this.chartDetectionService.detectChartType(
-                response.sql_query,
-                response.query_results
-              );
-              console.log('Fallback: Chart type detected:', chartType);
-
-              chartData = this.chartDetectionService.parseToChartData(
-                response.query_results,
-                chartType
-              );
-              console.log('Fallback: Chart data:', chartData);
-
-              showChart = true;
-              this.addDebugLog('info', `Frontend fallback chart: ${chartType} with ${response.query_results.length} data points`);
-            }
-          } else {
-            console.log('Chart detection skipped - no recommendation and missing data');
+          } else if (response.query_results && response.query_results.length > 0) {
+            // Data returned but no chart suggestion - cache for potential future visualization
+            this.lastChartRecommendation = {
+              chartData: undefined,
+              queryResults: response.query_results,
+              sqlQuery: response.sql_query,
+              timestamp: new Date()
+            };
+            this.addDebugLog('info', `Cached ${response.query_results.length} rows - ready for visualization`);
           }
 
           // Handle clarification needed
@@ -402,7 +457,9 @@ Example patterns:
             tasks: response.tasks,
             clarificationNeeded: response.clarification_needed,
             agentReasoning: response.agent_reasoning,
-            sessionId: response.session_id
+            sessionId: response.session_id,
+            chartSuggestion: chartSuggestion,
+            awaitingChartChoice: awaitingChartChoice
           });
 
           this.addDebugLog('info', `Query completed in ${responseTime}ms`);
@@ -437,6 +494,13 @@ Example patterns:
 
   clearChat(): void {
     this.messages = [];
+    // Clear the session to start fresh with updated system prompt
+    this.currentSessionId = null;
+    localStorage.removeItem('optimax-session-id');
+    this.addDebugLog('info', 'Chat cleared - next message will create a new session');
+    if (this.isUsingCustomPrompt) {
+      this.addDebugLog('info', 'New session will use the custom system prompt');
+    }
   }
 
   onKeyPress(event: KeyboardEvent): void {
@@ -461,6 +525,20 @@ Example patterns:
 
   closeSystemPromptManager(): void {
     this.showSystemPromptManager = false;
+    // Reload system prompt after closing in case it was changed
+    this.loadSystemPromptFromStorage();
+  }
+
+  loadSystemPromptFromStorage(): void {
+    const savedPrompt = localStorage.getItem('optimax-system-prompt');
+    if (savedPrompt) {
+      this.systemPrompt = savedPrompt;
+      this.isUsingCustomPrompt = true;
+      this.addDebugLog('info', 'Loaded custom system prompt from storage');
+    } else {
+      this.systemPrompt = this.defaultSystemPrompt;
+      this.isUsingCustomPrompt = false;
+    }
   }
 
 
@@ -788,5 +866,102 @@ Example patterns:
       'error': 'Error'
     };
     return names[taskType] || taskType;
+  }
+
+  // Handle user selecting a chart type from suggestions
+  selectChartType(chartType: string, messageIndex: number): void {
+    if (!this.lastChartRecommendation || !this.lastChartRecommendation.queryResults) {
+      this.addDebugLog('error', 'No cached data found for chart generation');
+      return;
+    }
+
+    this.addDebugLog('info', `User selected chart type: ${chartType}`);
+
+    // Generate chart data using selected type
+    const chartData = this.chartDetectionService.parseToChartData(
+      this.lastChartRecommendation.queryResults,
+      chartType as any
+    );
+
+    // Add new message showing the selected chart
+    this.messages.push({
+      type: 'ai',
+      content: `Here's your ${chartType.replace('_', ' ')} visualization:`,
+      timestamp: new Date(),
+      chartData: chartData,
+      showChart: true,
+      queryResults: this.lastChartRecommendation.queryResults,
+      sqlQuery: this.lastChartRecommendation.sqlQuery,
+      responseTime: 0 // Instant render from cached data
+    });
+
+    // Update cache with generated chart for instant replay
+    this.lastChartRecommendation.chartData = chartData;
+
+    // Mark the original message as no longer awaiting choice
+    if (messageIndex >= 0 && messageIndex < this.messages.length) {
+      this.messages[messageIndex].awaitingChartChoice = false;
+    }
+
+    this.addDebugLog('info', `Rendered ${chartType} chart from cached data`);
+  }
+
+  // Database Management Methods
+  openDatabaseSettings(): void {
+    this.showDatabaseSettings = true;
+    this.loadDatabaseSchema();
+  }
+
+  closeDatabaseSettings(): void {
+    this.showDatabaseSettings = false;
+    this.connectionTestResult = null;
+  }
+
+  loadDatabaseSchema(): void {
+    this.chatService.getDatabaseSchema().subscribe({
+      next: (response: any) => {
+        this.databaseSchema = response.schema;
+        this.tableCount = response.schema.table_count || 0;
+        this.addDebugLog('info', `Loaded schema: ${this.tableCount} tables`);
+      },
+      error: (error) => {
+        this.addDebugLog('error', `Failed to load schema: ${error.message}`);
+      }
+    });
+  }
+
+  toggleTableExpand(tableName: string): void {
+    this.expandedTables[tableName] = !this.expandedTables[tableName];
+  }
+
+  testConnection(): void {
+    if (!this.testConnectionUrl.trim()) {
+      alert('Please enter a database connection URL');
+      return;
+    }
+
+    this.isTestingConnection = true;
+    this.connectionTestResult = null;
+
+    this.chatService.testDatabaseConnection(this.testConnectionUrl).subscribe({
+      next: (result: any) => {
+        this.connectionTestResult = result;
+        this.isTestingConnection = false;
+
+        if (result.success) {
+          this.addDebugLog('info', `Connection test successful: ${result.table_count} tables found`);
+        } else {
+          this.addDebugLog('error', `Connection test failed: ${result.error}`);
+        }
+      },
+      error: (error) => {
+        this.connectionTestResult = {
+          success: false,
+          error: error.message || 'Connection test failed'
+        };
+        this.isTestingConnection = false;
+        this.addDebugLog('error', `Connection test failed: ${error.message}`);
+      }
+    });
   }
 }

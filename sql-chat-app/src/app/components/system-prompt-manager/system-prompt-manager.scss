@@ -109,7 +109,72 @@
     }
   }
 
+  .presets-section {
+    margin-bottom: 2rem;
+    padding: 1.5rem;
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.05), rgba(167, 139, 250, 0.05));
+    border: 1px solid rgba(139, 92, 246, 0.2);
+    border-radius: 8px;
+
+    h3 {
+      margin: 0 0 0.5rem 0;
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: #6d28d9;
+    }
+
+    .preset-description {
+      margin: 0 0 1rem 0;
+      color: #6b7280;
+      font-size: 0.85rem;
+    }
+
+    .preset-buttons {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 0.75rem;
+
+      .preset-btn {
+        padding: 0.75rem 1rem;
+        background: white;
+        border: 1.5px solid #c4b5fd;
+        border-radius: 6px;
+        color: #6d28d9;
+        font-size: 0.85rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        text-align: center;
+
+        &:hover {
+          background: #f5f3ff;
+          border-color: #8b5cf6;
+          transform: translateY(-1px);
+          box-shadow: 0 2px 4px rgba(139, 92, 246, 0.1);
+        }
+
+        &:active {
+          transform: translateY(0);
+        }
+      }
+    }
+  }
+
   .editor {
+    .workflow-info {
+      padding: 0.75rem 1rem;
+      background: rgba(59, 130, 246, 0.05);
+      border-left: 3px solid #3b82f6;
+      border-radius: 4px;
+      margin-bottom: 1rem;
+      font-size: 0.85rem;
+      color: #1e40af;
+
+      strong {
+        font-weight: 600;
+      }
+    }
+
     .editor-header {
       display: flex;
       justify-content: space-between;
@@ -239,6 +304,22 @@
           }
         }
 
+        &.apply {
+          background: linear-gradient(135deg, #10b981, #059669);
+          color: white;
+          font-weight: 600;
+
+          &:hover:not(:disabled) {
+            background: linear-gradient(135deg, #059669, #047857);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 6px rgba(16, 185, 129, 0.2);
+          }
+
+          &:active:not(:disabled) {
+            transform: translateY(0);
+          }
+        }
+
         &.secondary {
           background-color: #f3f4f6;
           color: #374151;
@@ -302,6 +383,61 @@
         font-weight: 600;
       }
     }
+
+    .workflow-steps {
+      margin-top: 1rem;
+      padding: 1rem;
+      background: white;
+      border-radius: 6px;
+      border: 1px solid rgba(59, 130, 246, 0.15);
+
+      h5 {
+        margin: 0 0 0.75rem 0;
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: #1e40af;
+      }
+
+      ol {
+        margin: 0;
+        padding-left: 1.5rem;
+        color: #374151;
+        font-size: 0.85rem;
+        line-height: 1.6;
+
+        li {
+          margin: 0.5rem 0;
+
+          strong {
+            color: #1f2937;
+            font-weight: 600;
+          }
+        }
+      }
+
+      .tip {
+        margin: 1rem 0 0 0;
+        padding: 0.75rem;
+        background: rgba(16, 185, 129, 0.05);
+        border-left: 3px solid #10b981;
+        border-radius: 4px;
+        font-size: 0.8rem;
+        color: #047857;
+
+        strong {
+          font-weight: 600;
+        }
+
+        code {
+          background: rgba(16, 185, 129, 0.1);
+          padding: 0.15rem 0.4rem;
+          border-radius: 3px;
+          font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+          font-size: 0.8rem;
+          color: #059669;
+        }
+      }
+    }
   }
 }
 
@@ -363,6 +499,52 @@
 
         &:hover:not(:disabled) {
           background-color: #4b5563;
+        }
+      }
+    }
+
+    .presets-section {
+      background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(167, 139, 250, 0.1));
+      border-color: rgba(139, 92, 246, 0.3);
+
+      h3 {
+        color: #a78bfa;
+      }
+
+      .preset-description {
+        color: #9ca3af;
+      }
+
+      .preset-buttons .preset-btn {
+        background: #374151;
+        border-color: #6d28d9;
+        color: #c4b5fd;
+
+        &:hover {
+          background: #4b5563;
+          border-color: #8b5cf6;
+        }
+      }
+    }
+
+    .editor .workflow-info {
+      background: rgba(59, 130, 246, 0.1);
+      border-left-color: #60a5fa;
+      color: #93c5fd;
+    }
+
+    .info-panel .workflow-steps {
+      background: #1f2937;
+      border-color: rgba(59, 130, 246, 0.2);
+
+      .tip {
+        background: rgba(16, 185, 129, 0.1);
+        border-left-color: #10b981;
+        color: #6ee7b7;
+
+        code {
+          background: rgba(16, 185, 129, 0.15);
+          color: #34d399;
         }
       }
     }

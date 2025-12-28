@@ -6,84 +6,22 @@ import { ChartData } from '../components/chart-visualization/chart-visualization
   providedIn: 'root'
 })
 export class ChartDetectionService {
+  /**
+   * OptimaX Visualization Workflow - Deterministic Chart Rendering Service
+   * ========================================================================
+   *
+   * This service is responsible ONLY for deterministic chart rendering.
+   * Per the OptimaX specification:
+   *
+   * - LLM classifies intent and suggests chart types via metadata tags
+   * - User selects chart type from suggestions
+   * - This service renders the chart using predefined templates
+   *
+   * NO heuristic detection or AI decision-making happens here.
+   * Role: Parse data → Render chart deterministically
+   */
 
   constructor() { }
-
-  /**
-   * Determines if a SQL query result should be visualized
-   * Only visualizes if user explicitly requests it
-   */
-  shouldVisualize(query: string, results: any[], userMessage?: string): boolean {
-    if (!results || results.length === 0) {
-      return false;
-    }
-
-    // Check if user explicitly requested visualization
-    if (!userMessage || !this.hasVisualizationIntent(userMessage)) {
-      return false;
-    }
-
-    const queryUpper = query.toUpperCase();
-    const hasAggregation = /COUNT|SUM|AVG|MAX|MIN/i.test(query);
-    const hasGroupBy = /GROUP\s+BY/i.test(query);
-    const firstRow = results[0];
-    const columnCount = Object.keys(firstRow).length;
-
-    // Visualize if:
-    // 1. Has aggregation functions OR
-    // 2. Has GROUP BY clause OR
-    // 3. Has exactly 2 columns (label + value pattern)
-    return (hasAggregation || hasGroupBy) && columnCount >= 2 && columnCount <= 4;
-  }
-
-  /**
-   * Checks if user message contains visualization intent keywords
-   */
-  private hasVisualizationIntent(userMessage: string): boolean {
-    const visualizationKeywords = [
-      'chart', 'graph', 'plot', 'visualize', 'visualization',
-      'show me a chart', 'show me a graph', 'draw', 'display chart',
-      'display graph', 'bar chart', 'line chart', 'pie chart',
-      'doughnut chart', 'show visually', 'visual representation'
-    ];
-
-    const messageLower = userMessage.toLowerCase();
-    return visualizationKeywords.some(keyword => messageLower.includes(keyword));
-  }
-
-  /**
-   * Detects the appropriate chart type based on query
-   */
-  detectChartType(query: string, results: any[]): ChartType {
-    const queryUpper = query.toUpperCase();
-
-    // Time series detection (line chart)
-    if (/DATE|TIME|MONTH|YEAR|DAY/i.test(query) && /GROUP\s+BY/i.test(query)) {
-      return 'line';
-    }
-
-    // Distribution/Proportion (pie/doughnut chart)
-    if (/LIMIT\s+\d+/i.test(query) && Object.keys(results[0] || {}).length === 2) {
-      const limitMatch = query.match(/LIMIT\s+(\d+)/i);
-      const limit = limitMatch ? parseInt(limitMatch[1]) : 0;
-      if (limit <= 8) {
-        return 'doughnut';
-      }
-    }
-
-    // COUNT or SUM aggregations (bar chart)
-    if (/COUNT|SUM/i.test(query)) {
-      return 'bar';
-    }
-
-    // AVG (line chart for trends)
-    if (/AVG/i.test(query)) {
-      return 'line';
-    }
-
-    // Default to bar chart
-    return 'bar';
-  }
 
   /**
    * Parses SQL results into chart data format
@@ -161,43 +99,4 @@ export class ChartDetectionService {
       .join(' ');
   }
 
-  /**
-   * Analyzes query complexity for visualization recommendations
-   */
-  getVisualizationRecommendation(query: string, results: any[]): {
-    shouldVisualize: boolean;
-    chartType: ChartType;
-    confidence: number;
-    reason: string;
-  } {
-    const shouldViz = this.shouldVisualize(query, results);
-    const chartType = this.detectChartType(query, results);
-
-    let confidence = 0;
-    let reason = '';
-
-    if (!shouldViz) {
-      reason = 'Query results are not suitable for visualization';
-      return { shouldVisualize: false, chartType: 'bar', confidence: 0, reason };
-    }
-
-    // Calculate confidence based on query patterns
-    const queryUpper = query.toUpperCase();
-
-    if (/GROUP\s+BY/i.test(query) && /COUNT|SUM/i.test(query)) {
-      confidence = 0.9;
-      reason = 'Aggregated data with grouping - excellent for charts';
-    } else if (/DATE|TIME/i.test(query) && /GROUP\s+BY/i.test(query)) {
-      confidence = 0.95;
-      reason = 'Time series data - perfect for line charts';
-    } else if (Object.keys(results[0]).length === 2) {
-      confidence = 0.8;
-      reason = 'Two-column data pattern - good for visualization';
-    } else {
-      confidence = 0.6;
-      reason = 'Data can be visualized with moderate effectiveness';
-    }
-
-    return { shouldVisualize: true, chartType, confidence, reason };
-  }
 }

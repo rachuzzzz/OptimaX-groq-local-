@@ -22,18 +22,13 @@ export interface AgentTask {
   dependencies?: string[];
 }
 
-export interface ChartRecommendation {
-  chart_type: 'bar' | 'line' | 'pie' | 'doughnut' | 'table' | 'none';
-  reasoning: string;
-  config?: {
-    x_axis?: string;
-    y_axis?: string;
-    y_axes?: string[];
-    labels?: string;
-    values?: string;
-    title?: string;
-    columns?: string[];
-  };
+export interface ChartSuggestion {
+  analysis_type: 'comparison' | 'time_series' | 'proportion' | 'correlation' | 'distribution';
+  recommended_charts: Array<{
+    type: string;
+    label: string;
+    recommended: boolean;
+  }>;
 }
 
 export interface ChatResponse {
@@ -47,7 +42,7 @@ export interface ChatResponse {
   data?: any;
   execution_time?: number;
   agent_reasoning?: string;
-  chart_recommendation?: ChartRecommendation;
+  chart_suggestion?: ChartSuggestion;
 }
 
 export interface SessionInfo {
@@ -129,5 +124,36 @@ export class ChatService {
   // Agent info
   getAgentInfo(): Observable<any> {
     return this.http.get(`${this.baseUrl}/agent/info`);
+  }
+
+  // Database Management
+  getDatabaseSchema(): Observable<any> {
+    return this.http.get(`${this.baseUrl}/database/schema`);
+  }
+
+  testDatabaseConnection(databaseUrl: string): Observable<any> {
+    return this.http.post(`${this.baseUrl}/database/test-connection`, {
+      database_url: databaseUrl
+    });
+  }
+
+  // System Prompt Management
+  getActiveSystemPrompt(): Observable<any> {
+    return this.http.get(`${this.baseUrl}/system-prompt/active`);
+  }
+
+  saveSystemPrompt(prompt: string, useDynamicSchema: boolean = true): Observable<any> {
+    return this.http.post(`${this.baseUrl}/system-prompt/save`, {
+      prompt: prompt,
+      use_dynamic_schema: useDynamicSchema
+    });
+  }
+
+  resetSystemPrompt(): Observable<any> {
+    return this.http.post(`${this.baseUrl}/system-prompt/reset`, {});
+  }
+
+  applySystemPrompt(): Observable<any> {
+    return this.http.post(`${this.baseUrl}/system-prompt/apply`, {});
   }
 }
