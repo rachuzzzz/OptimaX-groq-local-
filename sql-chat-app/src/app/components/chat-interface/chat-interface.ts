@@ -179,6 +179,11 @@ Example patterns:
   isTestingConnection: boolean = false;
   connectionTestResult: any = null;
 
+  // New database connection
+  newDatabaseUrl: string = '';
+  isConnectingDatabase: boolean = false;
+  newConnectionResult: any = null;
+
   // SQL Query tracking for debugging
   sqlQueryHistory: SQLQueryEntry[] = [];
   sqlQueryIdCounter: number = 1;
@@ -963,5 +968,45 @@ Example patterns:
         this.addDebugLog('error', `Connection test failed: ${error.message}`);
       }
     });
+  }
+
+  connectToNewDatabase(): void {
+    if (!this.newDatabaseUrl.trim()) {
+      alert('Please enter a database connection URL');
+      return;
+    }
+
+    this.isConnectingDatabase = true;
+    this.newConnectionResult = null;
+
+    this.chatService.connectDatabase(this.newDatabaseUrl).subscribe({
+      next: (result: any) => {
+        this.newConnectionResult = result;
+        this.isConnectingDatabase = false;
+
+        if (result.success) {
+          this.addDebugLog('info', `Connected to database: ${result.table_count} tables loaded`);
+          // Reload schema to show the new database
+          this.loadDatabaseSchema();
+          // Update table count
+          this.tableCount = result.table_count;
+        } else {
+          this.addDebugLog('error', `Connection failed: ${result.error}`);
+        }
+      },
+      error: (error) => {
+        this.newConnectionResult = {
+          success: false,
+          error: error.message || 'Connection failed'
+        };
+        this.isConnectingDatabase = false;
+        this.addDebugLog('error', `Connection failed: ${error.message}`);
+      }
+    });
+  }
+
+  fillExample(exampleUrl: string): void {
+    this.newDatabaseUrl = exampleUrl;
+    this.newConnectionResult = null;
   }
 }

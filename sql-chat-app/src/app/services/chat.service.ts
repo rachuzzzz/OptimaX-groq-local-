@@ -137,6 +137,12 @@ export class ChatService {
     });
   }
 
+  connectDatabase(databaseUrl: string): Observable<any> {
+    return this.http.post(`${this.baseUrl}/database/connect`, {
+      database_url: databaseUrl
+    });
+  }
+
   // System Prompt Management
   getActiveSystemPrompt(): Observable<any> {
     return this.http.get(`${this.baseUrl}/system-prompt/active`);

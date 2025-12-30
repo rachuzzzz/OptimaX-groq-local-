@@ -387,6 +387,97 @@ async def test_database_connection(request: DatabaseConnectionRequest):
         }
 
 
+@app.post("/database/connect")
+async def connect_to_database(request: DatabaseConnectionRequest):
+    """Connect to a new database and reload schema dynamically"""
+    global agent, db_manager, llm, sessions, custom_prompt_config, DATABASE_URL
+
+    try:
+        logger.info(f"Attempting to connect to new database...")
+
+        # First, test the connection
+        from sqlalchemy import create_engine, text, inspect
+
+        test_engine = create_engine(request.database_url)
+        with test_engine.connect() as conn:
+            result = conn.execute(text("SELECT 1"))
+            result.fetchone()
+
+        # Get schema info
+        inspector = inspect(test_engine)
+        schemas = inspector.get_schema_names()
+        table_count = 0
+        schema_names = []
+
+        for schema in schemas:
+            if schema not in ['information_schema', 'pg_catalog']:
+                tables = inspector.get_table_names(schema=schema)
+                table_count += len(tables)
+                schema_names.append(schema)
+
+        test_engine.dispose()
+
+        # Connection successful - now switch to it
+        DATABASE_URL = request.database_url
+
+        # Reinitialize tools with new database
+        tools, new_db_manager = initialize_tools(DATABASE_URL)
+        db_manager = new_db_manager
+        logger.info(f"✓ Database manager reinitialized: {table_count} tables")
+
+        # Generate new schema description
+        schema_description = db_manager.get_schema_for_llm()
+
+        # Determine final prompt with new schema
+        if custom_prompt_config["enabled"] and custom_prompt_config["prompt"]:
+            if custom_prompt_config["use_dynamic_schema"]:
+                final_prompt = custom_prompt_config["prompt"].replace("{SCHEMA_SECTION}", schema_description)
+                prompt_type = "CUSTOM (with dynamic schema)"
+            else:
+                final_prompt = custom_prompt_config["prompt"]
+                prompt_type = "CUSTOM (static)"
+        else:
+            final_prompt = SYSTEM_PROMPT_TEMPLATE.replace("{SCHEMA_SECTION}", schema_description)
+            prompt_type = "DEFAULT (dynamic)"
+
+        # Reinitialize agent with new schema
+        agent = ReActAgent.from_tools(
+            tools=tools,
+            llm=llm,
+            verbose=True,
+            max_iterations=5,
+            system_prompt=final_prompt,
+        )
+
+        # Clear all existing sessions
+        cleared_sessions = len(sessions)
+        sessions.clear()
+
+        logger.info("=" * 60)
+        logger.info(f"✓ Connected to new database!")
+        logger.info(f"Tables: {table_count}")
+        logger.info(f"Schemas: {', '.join(schema_names)}")
+        logger.info(f"Prompt: {prompt_type}")
+        logger.info(f"Sessions cleared: {cleared_sessions}")
+        logger.info("=" * 60)
+
+        return {
+            "success": True,
+            "message": "Successfully connected to database",
+            "table_count": table_count,
+            "schemas": schema_names,
+            "prompt_type": prompt_type,
+            "sessions_cleared": cleared_sessions
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to connect to database: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
 @app.get("/system-prompt/active")
 async def get_active_system_prompt():
     """Get the currently active system prompt"""

@@ -56,7 +56,7 @@ import { ChatService } from '../../services/chat.service';
           <details>
             <summary>💡 Prompt Guidelines</summary>
             <ul>
-              <li>Use {SCHEMA_SECTION} placeholder for dynamic schema injection</li>
+              <li>Use {{ '{SCHEMA_SECTION}' }} placeholder for dynamic schema injection</li>
               <li>Include EFFICIENCY RULES to prevent excessive queries</li>
               <li>Specify when to use execute_sql vs get_schema tools</li>
               <li>Define STOP conditions to prevent max iterations errors</li>
@@ -97,7 +97,7 @@ import { ChatService } from '../../services/chat.service';
             <li><strong>Apply Changes</strong> - Hot-reloads agent without restart (clears sessions)</li>
             <li><strong>Test</strong> - Try it out with sample queries</li>
           </ol>
-          <p class="tip">💡 <strong>Tip:</strong> Use <code>{{ '{' }}SCHEMA_SECTION{{ '}' }}</code> in your prompt for dynamic schema injection.</p>
+          <p class="tip">💡 <strong>Tip:</strong> Use <code>{{ '{SCHEMA_SECTION}' }}</code> in your prompt for dynamic schema injection.</p>
         </div>
       </div>
 

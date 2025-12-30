@@ -585,10 +585,82 @@
     </div>
 
     <div class="modal-body">
-      <div class="info-box">
-        <p><strong>ℹ️ Note:</strong> Changing the database connection requires restarting the backend with the new DATABASE_URL environment variable.</p>
-        <p>The backend will need to be restarted manually with the new connection string.</p>
+      <!-- Connect New Database Section -->
+      <div class="connect-database-section">
+        <h4>🔌 Connect to PostgreSQL Database</h4>
+        <p class="section-description">Connect to any PostgreSQL database and OptimaX will automatically load the schema.</p>
+
+        <div class="connection-form">
+          <input
+            type="text"
+            [(ngModel)]="newDatabaseUrl"
+            placeholder="postgresql://user:password@host:port/database"
+            class="database-url-input"
+            [disabled]="isConnectingDatabase">
+
+          <button
+            class="btn-connect"
+            (click)="connectToNewDatabase()"
+            [disabled]="isConnectingDatabase || !newDatabaseUrl.trim()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" *ngIf="!isConnectingDatabase">
+              <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+            </svg>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" *ngIf="isConnectingDatabase" class="spin">
+              <circle cx="12" cy="12" r="10"/>
+              <path d="M12 6v6l4 2"/>
+            </svg>
+            {{ isConnectingDatabase ? 'Connecting...' : 'Connect & Load Schema' }}
+          </button>
+        </div>
+
+        <div class="connection-result" *ngIf="newConnectionResult">
+          <div class="result-alert" [class.success]="newConnectionResult.success" [class.error]="!newConnectionResult.success">
+            <div class="result-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" *ngIf="newConnectionResult.success">
+                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                <polyline points="22 4 12 14.01 9 11.01"/>
+              </svg>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" *ngIf="!newConnectionResult.success">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="15" y1="9" x2="9" y2="15"/>
+                <line x1="9" y1="9" x2="15" y2="15"/>
+              </svg>
+            </div>
+            <div class="result-content">
+              <p *ngIf="newConnectionResult.success">
+                <strong>Successfully connected!</strong><br>
+                Loaded {{ newConnectionResult.table_count }} tables from schemas: {{ newConnectionResult.schemas?.join(', ') }}
+              </p>
+              <p *ngIf="!newConnectionResult.success">
+                <strong>Connection failed</strong><br>
+                {{ newConnectionResult.error }}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div class="quick-examples">
+          <details>
+            <summary>💡 Connection String Examples</summary>
+            <div class="examples-list">
+              <div class="example-item" (click)="fillExample('postgresql://user:pass@localhost:5432/mydb')">
+                <code>postgresql://user:pass@localhost:5432/mydb</code>
+                <span class="example-label">Local Database</span>
+              </div>
+              <div class="example-item" (click)="fillExample('postgresql://user:pass@host.com:5432/db')">
+                <code>postgresql://user:pass@host.com:5432/db</code>
+                <span class="example-label">Remote Database</span>
+              </div>
+              <div class="example-item" (click)="fillExample('postgresql://user:pass@localhost:5432/db?sslmode=require')">
+                <code>postgresql://user:pass@localhost:5432/db?sslmode=require</code>
+                <span class="example-label">With SSL</span>
+              </div>
+            </div>
+          </details>
+        </div>
       </div>
+
+      <div class="divider"></div>
 
       <div class="current-connection">
         <h4>Current Database</h4>
