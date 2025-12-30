@@ -252,6 +252,135 @@ custom_prompt_config = {
 }
 
 
+# ===================================================================
+# QUERY GOVERNANCE - Analytical Complexity Classifier
+# ===================================================================
+
+def classify_query_complexity(user_message: str) -> Dict[str, Any]:
+    """
+    Rule-based analytical complexity classifier (NO ML/embeddings).
+
+    Detects analytical signals across multiple categories:
+    - ranking: top, best, worst, highest, lowest
+    - classification: vip, frequent, inactive, segment, group
+    - time_windows: last, past, days, months, quarters, year
+    - behavioral: preferred, most common, average, typical
+    - flagging: identify, mark, flag, whether, detect
+
+    Returns:
+        {
+            "is_analytical": bool,           # True if 2+ signal categories detected
+            "signal_categories": List[str],  # Detected category names
+            "signal_count": int,             # Total signals detected
+            "detected_signals": Dict,        # Signals per category
+        }
+    """
+    msg_lower = user_message.lower()
+
+    # Define signal patterns by category
+    signal_patterns = {
+        "ranking": ["top", "best", "worst", "highest", "lowest", "rank", "leading", "bottom"],
+        "classification": ["vip", "frequent", "inactive", "segment", "group", "categorize", "classify", "tier"],
+        "time_windows": ["last", "past", "previous", "recent", "days", "months", "quarters", "year", "week"],
+        "behavioral": ["preferred", "most common", "average", "typical", "usual", "tendency", "pattern", "behavior"],
+        "flagging": ["identify", "mark", "flag", "whether", "detect", "find out", "check if", "determine"],
+    }
+
+    detected_signals = {}
+    signal_categories = []
+    total_signals = 0
+
+    # Detect signals in each category
+    for category, keywords in signal_patterns.items():
+        found_keywords = [kw for kw in keywords if kw in msg_lower]
+        if found_keywords:
+            detected_signals[category] = found_keywords
+            signal_categories.append(category)
+            total_signals += len(found_keywords)
+
+    # Classify as ANALYTICAL if 2+ categories detected
+    is_analytical = len(signal_categories) >= 2
+
+    return {
+        "is_analytical": is_analytical,
+        "signal_categories": signal_categories,
+        "signal_count": total_signals,
+        "detected_signals": detected_signals,
+    }
+
+
+def generate_governance_clarification(
+    classification: Dict[str, Any],
+    user_message: str
+) -> str:
+    """
+    Generate a governed clarification response for analytical queries.
+
+    Explains:
+    - Multiple analytical objectives detected
+    - Staged execution is required
+    - Suggests a valid first step
+    """
+    categories = classification["signal_categories"]
+    signals = classification["detected_signals"]
+
+    # Build category descriptions
+    category_descriptions = []
+    if "ranking" in categories:
+        category_descriptions.append(f"**Ranking analysis** ({', '.join(signals['ranking'])})")
+    if "classification" in categories:
+        category_descriptions.append(f"**Classification/Segmentation** ({', '.join(signals['classification'])})")
+    if "time_windows" in categories:
+        category_descriptions.append(f"**Time-based filtering** ({', '.join(signals['time_windows'])})")
+    if "behavioral" in categories:
+        category_descriptions.append(f"**Behavioral analysis** ({', '.join(signals['behavioral'])})")
+    if "flagging" in categories:
+        category_descriptions.append(f"**Conditional flagging** ({', '.join(signals['flagging'])})")
+
+    response = f"""**Multi-Objective Query Detected**
+
+I detected **{len(categories)} analytical objectives** in your query:
+
+{chr(10).join('• ' + desc for desc in category_descriptions)}
+
+**Why staged execution is required:**
+Complex analytical queries combining multiple objectives need to be broken down into discrete steps to ensure:
+- Accurate results for each metric
+- Predictable execution
+- Explainable insights
+
+**Suggested first step:**
+Let's start by establishing the **base dataset** for your analysis.
+
+Please choose what to retrieve first:
+1. **List the relevant records** (e.g., "show all customers" or "list flights from JFK")
+2. **Apply time filters** (e.g., "flights in the last 30 days")
+3. **Define the entity scope** (e.g., "passengers with bookings")
+
+Once we have the base data, we can layer on ranking, classification, or behavioral analysis in subsequent queries.
+
+**Tip:** Break your analysis into steps like you would in a BI tool - each query should focus on one clear objective."""
+
+    return response
+
+
+def reset_analytical_context(session: Dict[str, Any], reason: str = "new_query"):
+    """
+    Reset analytical context for a session.
+
+    Triggered by:
+    - New SQL query execution
+    - Database connection change
+    """
+    logger.info(f"Resetting analytical context: {reason}")
+    session["analytical_context"] = {
+        "objective_type": None,
+        "entity": None,
+        "status": "pending",
+        "last_sql_result": None,
+    }
+
+
 def get_or_create_session(session_id: str, custom_prompt: Optional[str] = None) -> Dict[str, Any]:
     """Get existing session or create new one - reuses base agent for free tier optimization"""
     global agent, llm
@@ -277,6 +406,13 @@ def get_or_create_session(session_id: str, custom_prompt: Optional[str] = None) 
             "last_active": datetime.now(),
             "message_count": 0,
             "custom_prompt": custom_prompt is not None,
+            # Analytical context tracking for Query Governance
+            "analytical_context": {
+                "objective_type": None,  # e.g., ranking, aggregation, classification
+                "entity": None,          # e.g., customer, route, flight
+                "status": "pending",     # pending, completed
+                "last_sql_result": None, # Cache last valid SQL result for viz reuse
+            }
         }
 
         prompt_type = "custom" if custom_prompt else "default"
@@ -449,9 +585,11 @@ async def connect_to_database(request: DatabaseConnectionRequest):
             system_prompt=final_prompt,
         )
 
-        # Clear all existing sessions
+        # Clear all existing sessions (and their analytical contexts)
         cleared_sessions = len(sessions)
         sessions.clear()
+
+        logger.info(f"✓ Analytical contexts reset for all sessions (database change)")
 
         logger.info("=" * 60)
         logger.info(f"✓ Connected to new database!")
@@ -895,7 +1033,49 @@ What would you like to do with this information?
         # SQL AGENT EXECUTION - Only reached if clear database action detected
         # (Passed all 4 gates: not viz, not greeting, not ambiguous, has action)
         # ===================================================================
-        logger.info(f"Database action confirmed - routing to SQL agent")
+        logger.info(f"Database action confirmed - checking query complexity")
+
+        # ===================================================================
+        # QUERY GOVERNANCE - Analytical Complexity Classification
+        # Insert AFTER intent routing, BEFORE SQL agent execution
+        # ===================================================================
+        classification = classify_query_complexity(message.message)
+
+        if classification["is_analytical"]:
+            # ANALYTICAL/MULTI-METRIC query detected - GOVERNED RESPONSE
+            logger.info(
+                f"⚠️ Analytical query detected: {classification['signal_count']} signals "
+                f"across {len(classification['signal_categories'])} categories: "
+                f"{', '.join(classification['signal_categories'])}"
+            )
+
+            # Generate governed clarification response
+            governance_response = generate_governance_clarification(
+                classification, message.message
+            )
+
+            execution_time = (datetime.now() - start_time).total_seconds()
+
+            # Return clarification - DO NOT execute SQL
+            return ChatResponse(
+                response=governance_response,
+                session_id=session_id,
+                sql_query=None,
+                query_results=None,
+                data=None,
+                execution_time=execution_time,
+                clarification_needed=True,
+                error=None,
+            )
+        else:
+            # SIMPLE/COMPARATIVE query - allow ONE SQL execution
+            logger.info(
+                f"✓ Simple query classification: {classification['signal_count']} signals, "
+                f"{len(classification['signal_categories'])} categories - proceeding to SQL agent"
+            )
+
+        # Reset analytical context before new SQL execution
+        reset_analytical_context(session, reason="new_sql_query")
 
         # Execute query through agent with timeout
         try:
@@ -947,6 +1127,11 @@ What would you like to do with this information?
             logger.info(
                 f"Extracted SQL and {len(data) if data else 0} rows from tool execution"
             )
+
+            # Store result in session's analytical context for visualization reuse
+            session["analytical_context"]["last_sql_result"] = last_result
+            session["analytical_context"]["status"] = "completed"
+            logger.info("✓ SQL result cached in analytical context for visualization reuse")
 
         execution_time = (datetime.now() - start_time).total_seconds()
 
