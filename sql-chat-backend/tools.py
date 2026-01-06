@@ -1,18 +1,14 @@
 """
-OptimaX Tools - SQL Tools + One-Shot Visualization Classifier
-==============================================================
+OptimaX Tools - SQL Tools + Visualization Classifier
+=====================================================
 
 Tools:
 1. SQL Query Execution (via ReActAgent)
-2. One-shot Visualization Classification (separate LLM call, no agent)
-
-NEW in v4.2: classify_visualization_intent()
-- No agent, no tools, no retries
-- Pure LLM classification for chart type suggestions
-- Eliminates timeouts and infinite loops
+2. One-shot Visualization Classification
+3. LLM-based Intent Classification
 
 Author: OptimaX Team
-Version: 4.2 (Split Visualization Architecture)
+Version: 4.3 (DJPI v3 + Query Governance)
 """
 
 import logging
@@ -37,13 +33,13 @@ class DatabaseManager:
         """Initialize database connection"""
         self.database_url = database_url
         self.engine = create_engine(database_url)
-        self.active_schema = None  # Will be auto-detected
+        self.active_schema = None
         self.schema = self._load_schema()
-        self.cached_schema = None  # Free tier optimization: cache schema text
+        self.cached_schema = None
         logger.info(f"Database connected successfully (Schema: {self.active_schema or 'public'})")
 
     def _load_schema(self) -> Dict[str, Any]:
-        """Load database schema information (lazy loading for faster startup)"""
+        """Load database schema information"""
         try:
             inspector = inspect(self.engine)
             schema_info = {"tables": {}}
@@ -101,8 +97,7 @@ class DatabaseManager:
             return {"tables": {}}
 
     def get_schema_text(self) -> str:
-        """Get human-readable schema description (cached for free tier)"""
-        # Free tier optimization: return cached schema if available
+        """Get human-readable schema description"""
         if self.cached_schema:
             return self.cached_schema
 
@@ -301,10 +296,6 @@ class DatabaseManager:
             return False, f"SQL validation error: {str(e)}"
 
 
-# ChartRecommender removed - LLM now reasons autonomously about chart types
-# No hardcoded logic - the LLM analyzes data and makes intelligent decisions
-
-
 # Tool creation functions for LlamaIndex Agent
 
 
@@ -391,12 +382,6 @@ def create_schema_tool(db_manager: DatabaseManager) -> FunctionTool:
     )
 
 
-# Chart tool REMOVED per OptimaX Visualization Workflow specification
-# LLM must ONLY use [CHART_SUGGESTION: ...] tags in response text
-# System enforces deterministic rendering after user selection
-# NO LLM involvement in chart configuration or rendering
-
-
 def get_last_sql_result():
     """Get the last SQL execution result"""
     global _last_sql_result
@@ -419,6 +404,79 @@ def clear_last_chart_config():
     """Clear the last chart configuration"""
     global _last_chart_config
     _last_chart_config = None
+
+
+def classify_query_intent(
+    llm,
+    user_query: str,
+    conversation_context: bool = False
+) -> Dict[str, Any]:
+    """
+    LLM-based intent classification to replace keyword matching.
+
+    Autonomous reasoning instead of brittle rules.
+
+    Args:
+        llm: Groq LLM instance
+        user_query: The user's question
+        conversation_context: True if this is a follow-up question in an ongoing conversation
+
+    Returns:
+        Dict with intent classification
+    """
+    prompt = f"""You are an intent classifier for a database query system. Classify the user's intent.
+
+USER QUERY: "{user_query}"
+
+CONTEXT: {"This is a follow-up question in an ongoing conversation" if conversation_context else "This is a new question"}
+
+INTENT TYPES:
+1. "database_query" - User wants to retrieve, analyze, or query database data
+   Examples: "show flights", "which route is longest", "how many bookings", "list passengers"
+
+2. "greeting" - User is greeting or making small talk
+   Examples: "hi", "hello", "how are you", "thanks"
+
+3. "clarification_needed" - Question is too vague without more context
+   Examples: "what about john?" (without knowing what to show about john)
+
+CLASSIFICATION RULES:
+- If user asks ANY question about data (even follow-ups like "which of these"), classify as "database_query"
+- Comparative/superlative questions are ALWAYS "database_query" ("longest", "fastest", "which", "best")
+- Follow-up questions referencing previous results are "database_query"
+- Only use "clarification_needed" if truly ambiguous (rare)
+
+RESPONSE FORMAT (JSON only):
+{{
+    "intent": "database_query|greeting|clarification_needed",
+    "confidence": 0.95,
+    "reasoning": "Brief explanation"
+}}
+
+Respond with ONLY the JSON object, nothing else."""
+
+    try:
+        response = llm.complete(prompt)
+        response_text = str(response).strip()
+
+        # Extract JSON from response
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+
+        result = json.loads(response_text)
+        logger.info(f"✓ Intent classified: {result.get('intent')} (confidence: {result.get('confidence', 0)})")
+        return result
+
+    except Exception as e:
+        logger.error(f"Intent classification failed: {str(e)}")
+        # Conservative fallback: assume database query to avoid blocking valid questions
+        return {
+            "intent": "database_query",
+            "confidence": 0.5,
+            "reasoning": "Fallback due to classification error"
+        }
 
 
 def classify_visualization_intent(
@@ -458,20 +516,26 @@ ANALYSIS TYPES:
 - correlation: Relationship between two numeric variables
 - distribution: Statistical spread of values
 
-CHART OPTIONS:
-- bar, horizontal_bar, line, pie, doughnut, area, scatter, table
+CHART OPTIONS (MUST use these exact types):
+- bar: Vertical bar chart (good for comparisons)
+- line: Line chart (good for time series and trends)
+- pie: Pie chart (good for proportions with ≤6 categories)
+- doughnut: Doughnut chart (good for proportions with ≤6 categories)
 
-RESPONSE FORMAT (JSON only):
+RESPONSE FORMAT (JSON only - use ONLY the chart types listed above):
 {{
     "analysis_type": "comparison|time_series|proportion|correlation|distribution",
     "recommended_charts": [
         {{"type": "bar", "label": "Bar Chart", "recommended": true}},
-        {{"type": "horizontal_bar", "label": "Horizontal Bar", "recommended": false}},
-        {{"type": "table", "label": "Data Table", "recommended": false}}
+        {{"type": "line", "label": "Line Chart", "recommended": false}},
+        {{"type": "pie", "label": "Pie Chart", "recommended": false}}
     ]
 }}
 
 Respond with ONLY the JSON object, nothing else."""
+
+    # Valid Chart.js types supported by frontend
+    VALID_CHART_TYPES = {'bar', 'line', 'pie', 'doughnut'}
 
     try:
         # One-shot LLM call - no agent, no tools
@@ -486,7 +550,35 @@ Respond with ONLY the JSON object, nothing else."""
             response_text = response_text.split("```")[1].split("```")[0].strip()
 
         result = json.loads(response_text)
-        logger.info(f"✓ Visualization classified: {result.get('analysis_type')}")
+
+        # Validate and filter chart types to only valid ones
+        if "recommended_charts" in result:
+            validated_charts = []
+            for chart in result["recommended_charts"]:
+                chart_type = chart.get("type", "").lower()
+                # Map invalid types to valid ones
+                if chart_type == "horizontal_bar":
+                    chart_type = "bar"
+                if chart_type == "area":
+                    chart_type = "line"
+
+                # Only include valid chart types
+                if chart_type in VALID_CHART_TYPES:
+                    chart["type"] = chart_type
+                    validated_charts.append(chart)
+                else:
+                    logger.warning(f"Skipping invalid chart type: {chart_type}")
+
+            result["recommended_charts"] = validated_charts
+
+            # Ensure at least one chart is recommended
+            if not validated_charts:
+                logger.warning("No valid charts suggested, using bar as fallback")
+                result["recommended_charts"] = [
+                    {"type": "bar", "label": "Bar Chart", "recommended": True}
+                ]
+
+        logger.info(f"✓ Visualization classified: {result.get('analysis_type')} with {len(result.get('recommended_charts', []))} valid charts")
         return result
 
     except Exception as e:
@@ -496,7 +588,7 @@ Respond with ONLY the JSON object, nothing else."""
             "analysis_type": "comparison",
             "recommended_charts": [
                 {"type": "bar", "label": "Bar Chart", "recommended": True},
-                {"type": "table", "label": "Data Table", "recommended": False}
+                {"type": "line", "label": "Line Chart", "recommended": False}
             ]
         }
 
@@ -513,9 +605,6 @@ def initialize_tools(database_url: str) -> tuple:
     tools = [
         create_sql_tool(db_manager),
         create_schema_tool(db_manager),
-        # NO CHART TOOL - Per OptimaX Visualization Workflow spec:
-        # LLM uses [CHART_SUGGESTION: ...] tags only
-        # System handles rendering deterministically after user selection
     ]
 
     logger.info(f"Initialized {len(tools)} tools")

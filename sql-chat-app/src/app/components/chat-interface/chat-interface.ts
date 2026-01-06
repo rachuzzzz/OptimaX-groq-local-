@@ -880,6 +880,15 @@ Example patterns:
       return;
     }
 
+    // Validate chart type
+    const validChartTypes = ['bar', 'line', 'pie', 'doughnut'];
+    const normalizedChartType = chartType.toLowerCase().replace('_', '').replace('-', '');
+
+    if (!validChartTypes.includes(normalizedChartType) && !validChartTypes.includes(chartType)) {
+      this.addDebugLog('error', `Invalid chart type: ${chartType}. Using 'bar' as fallback.`);
+      chartType = 'bar';
+    }
+
     this.addDebugLog('info', `User selected chart type: ${chartType}`);
 
     // Generate chart data using selected type

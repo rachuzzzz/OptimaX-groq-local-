@@ -1,19 +1,22 @@
 """
-OptimaX v4.2 - Split Visualization Architecture
-================================================
+OptimaX v4.3 - DJPI v3 Upgrade
+===============================
 
-BREAKTHROUGH: Visualization is now a separate one-shot LLM call
-- NO agent for visualization (eliminates timeouts & infinite loops)
-- NO tools for visualization (pure classification)
-- NO retries (fast, deterministic)
+LATEST: DJPI v3 with enhanced join path inference
+- ✓ Acyclic path enforcement (no table visited twice)
+- ✓ Strengthened join scoring (timestamp/attribute penalties)
+- ✓ Cost-aware optimization (max depth: 4 hops)
+- ✓ Enhanced debug logging & constraint-based guidance
+- ✓ Semantic intent clarification for "add attribute"
 
 Architecture:
 - ReActAgent: SQL queries and data analysis
+- DJPI v3: Database-agnostic join path inference
 - One-shot LLM: Visualization classification (classify_visualization_intent)
-- Separation of concerns = reliability + speed
+- Query Governance: Analytical complexity classification
 
 Author: OptimaX Team
-Version: 4.2
+Version: 4.3 (DJPI v3)
 """
 
 from fastapi import FastAPI, HTTPException
@@ -36,27 +39,34 @@ from tools import (
     get_last_sql_result,
     clear_last_sql_result,
     classify_visualization_intent,
+    classify_query_intent,
+)
+
+from join_path_inference import (
+    SchemaGraph,
+    format_join_guidance,
+    identify_tables_for_query,
 )
 
 load_dotenv()
 
-# Configure logging - minimal for free tier performance
+# Configure logging
 logging.basicConfig(
-    level=logging.WARNING,  # Free tier optimization: reduce console spam
+    level=logging.WARNING,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)  # Keep INFO for our app, WARNING for libraries
+logger.setLevel(logging.INFO)
 
 
 # Lifespan context manager for startup/shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize system on startup, cleanup on shutdown"""
-    global agent, db_manager, llm, custom_prompt_config
+    global agent, db_manager, llm, custom_prompt_config, schema_graph
 
     try:
-        logger.info("Initializing OptimaX v4.2...")
+        logger.info("Initializing OptimaX v4.3 (DJPI v3)...")
 
         # Verify API key
         if not GROQ_API_KEY:
@@ -68,12 +78,12 @@ async def lifespan(app: FastAPI):
         if not DATABASE_URL:
             raise ValueError("DATABASE_URL not found in environment variables!")
 
-        # Initialize Groq LLM with optimized settings
+        # Initialize Groq LLM
         llm = Groq(
             model=GROQ_MODEL,
             api_key=GROQ_API_KEY,
-            temperature=0.0,        # Deterministic
-            max_output_tokens=500,  # Increased for chart reasoning
+            temperature=0.0,
+            max_output_tokens=500,
         )
         logger.info(f"✓ Groq LLM initialized: {GROQ_MODEL}")
 
@@ -85,6 +95,17 @@ async def lifespan(app: FastAPI):
         schema_description = db_manager.get_schema_for_llm()
         dynamic_prompt = SYSTEM_PROMPT_TEMPLATE.replace("{SCHEMA_SECTION}", schema_description)
         logger.info(f"✓ Dynamic schema generated ({len(schema_description)} chars)")
+
+        # DJPI: Build schema graph for join path inference
+        schema_graph = SchemaGraph()
+        schema_dict = {}
+        for table_name, table_info in db_manager.schema["tables"].items():
+            schema_dict[table_name] = [
+                {"name": col["name"], "type": str(col["type"])}
+                for col in table_info["columns"]
+            ]
+        schema_graph.build_from_schema(schema_dict)
+        logger.info(f"✓ DJPI schema graph initialized")
 
         # Load custom prompt if exists
         if os.path.exists(CUSTOM_PROMPT_FILE):
@@ -116,19 +137,19 @@ async def lifespan(app: FastAPI):
             final_prompt = dynamic_prompt
             logger.info("✓ Using DEFAULT dynamic prompt")
 
-        # Initialize base agent with final prompt (template for sessions)
+        # Initialize base agent with final prompt
         agent = ReActAgent.from_tools(
             tools=tools,
             llm=llm,
-            verbose=True,        # Enable verbose logs to debug tool calling
-            max_iterations=5,    # Limited to prevent excessive queries (Groq optimization)
+            verbose=True,
+            max_iterations=5,
             system_prompt=final_prompt,
         )
         logger.info("✓ ReActAgent initialized")
 
         logger.info("=" * 60)
-        logger.info("OptimaX v4.2 Ready!")
-        logger.info(f"Architecture: Split Viz (ReActAgent + One-shot LLM)")
+        logger.info("OptimaX v4.3 (DJPI v3) Ready!")
+        logger.info(f"Architecture: DJPI v3 + ReActAgent + One-shot LLM + Query Governance")
         logger.info(f"Tools: {len(tools)} (SQL only - Viz handled separately)")
         logger.info(f"Database: {len(db_manager.schema['tables'])} tables detected")
         logger.info(f"Prompt: {'CUSTOM' if custom_prompt_config['enabled'] else 'DEFAULT'}")
@@ -148,14 +169,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="OptimaX SQL Chat API",
     description="Split visualization architecture: ReActAgent for queries, one-shot LLM for viz",
-    version="4.2",
+    version="4.3",
     lifespan=lifespan,
 )
 
-# CORS - relaxed for local testing
+# CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Free tier: allow all origins for easy testing
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -164,13 +185,14 @@ app.add_middleware(
 # Configuration
 DATABASE_URL = os.getenv("DATABASE_URL")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = "llama-3.3-70b-versatile"  # Available on your API key
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # Global instances
 agent = None
 db_manager = None
-llm = None  # Global LLM instance for one-shot visualization calls
-sessions: Dict[str, Dict[str, Any]] = {}  # {session_id: {agent, metadata}}
+llm = None
+schema_graph = None
+sessions: Dict[str, Dict[str, Any]] = {}
 
 
 # Pydantic Models
@@ -233,6 +255,16 @@ RULES:
 - For date/time: EXTRACT(MONTH FROM column_name)
 - Prefer COUNT/AVG/SUM/GROUP BY over raw rows
 - Order DESC for most, ASC for least
+
+SEMANTIC INTENT CLARIFICATION:
+When users say:
+- "add [column/attribute/field]" → Include in SELECT projection (NOT ALTER TABLE)
+- "include [column]" → Include in SELECT projection
+- "show [column]" → Include in SELECT projection
+- "add a column to the results" → Include in SELECT projection
+
+You are READ-ONLY. Never attempt ALTER TABLE, INSERT, UPDATE, or DELETE.
+These phrases mean "include in query output", not "modify schema".
 
 RESPONSE:
 - Answer the question and STOP
@@ -382,12 +414,11 @@ def reset_analytical_context(session: Dict[str, Any], reason: str = "new_query")
 
 
 def get_or_create_session(session_id: str, custom_prompt: Optional[str] = None) -> Dict[str, Any]:
-    """Get existing session or create new one - reuses base agent for free tier optimization"""
+    """Get existing session or create new one with optional custom prompt"""
     global agent, llm
 
     if session_id not in sessions:
-        # Use custom agent if custom prompt provided
-        session_agent = agent  # Default to global agent
+        session_agent = agent
 
         if custom_prompt:
             logger.info(f"Creating session with custom system prompt: {session_id}")
@@ -396,7 +427,7 @@ def get_or_create_session(session_id: str, custom_prompt: Optional[str] = None) 
                 tools=tools,
                 llm=llm,
                 verbose=True,
-                max_iterations=5,  # Limited to prevent excessive queries
+                max_iterations=5,
                 system_prompt=custom_prompt,
             )
 
@@ -425,14 +456,15 @@ def get_or_create_session(session_id: str, custom_prompt: Optional[str] = None) 
 @app.get("/")
 async def root():
     return {
-        "message": "OptimaX SQL Chat API v4.2",
-        "version": "4.2",
-        "architecture": "Split Visualization: ReActAgent (queries) + One-shot LLM (viz)",
+        "message": "OptimaX SQL Chat API v4.3",
+        "version": "4.3",
+        "architecture": "DJPI v3 + ReActAgent + Query Governance",
         "features": [
             "SQL query execution via ReActAgent",
-            "One-shot chart classification (no timeouts)",
+            "DJPI v3 - Dynamic Join Path Inference",
+            "Query Governance Layer",
+            "One-shot chart classification",
             "Session-based memory",
-            "Natural language interface",
         ],
     }
 
@@ -446,7 +478,7 @@ async def health_check():
 
         return {
             "status": "healthy",
-            "version": "4.2",
+            "version": "4.3",
             "model": GROQ_MODEL,
             "active_sessions": len(sessions),
             "database_tables": len(db_manager.schema['tables']) if db_manager else 0
@@ -808,8 +840,7 @@ async def chat(message: ChatMessage):
         viz_keywords = ["visualize", "vizualize", "graph", "chart", "plot", "pictorially", "show chart", "show as chart", "display chart"]
         is_viz_request = any(keyword in user_msg_lower for keyword in viz_keywords)
 
-        # Clear previous tool results ONLY if NOT a visualization request
-        # (Visualization needs the cached data from previous query!)
+        # Clear cached data unless this is a visualization request
         if not is_viz_request:
             clear_last_sql_result()
             logger.info("Cleared cached SQL results (new query)")
@@ -945,74 +976,35 @@ What would you like to explore?"""
                 error=None,
             )
 
-        # GATE 3: Ambiguous Entity Detection (mentions name/entity without clear action)
-        # Detects queries like "tell me about X" without database action verbs
-        ambiguous_entity_patterns = [
-            "tell me about", "tell me more about", "more about",
-            "what about", "who is", "what is", "about",
-            "information on", "info on", "details on", "details about",
-        ]
+        # GATE 3: LLM-Based Intent Classification (AUTONOMOUS - no keywords!)
+        # Use LLM to reason about intent instead of brittle keyword matching
+        logger.info("🤖 Using LLM to classify query intent...")
 
-        database_action_keywords = [
-            # Action verbs - these override ambiguity
-            "show", "list", "find", "get", "count", "compare", "filter",
-            # Data language
-            "records", "rows", "entries", "data",
-            # Analysis words
-            "average", "total", "top", "most", "least", "all",
-        ]
+        # Check if this is a follow-up (session exists)
+        is_follow_up = session_id is not None and session_id in sessions
 
-        has_ambiguous_entity = any(pattern in user_msg_lower for pattern in ambiguous_entity_patterns)
-        has_database_action = any(keyword in user_msg_lower for keyword in database_action_keywords)
+        intent_classification = classify_query_intent(
+            llm=llm,
+            user_query=message.message,
+            conversation_context=is_follow_up
+        )
 
-        # GATE 3 HANDLER: Ambiguous Entity → Disambiguation Response
-        if has_ambiguous_entity and not has_database_action:
-            # Extract the entity name (simple heuristic: words after the pattern)
-            entity_name = "this entity"
-            for pattern in ambiguous_entity_patterns:
-                if pattern in user_msg_lower:
-                    parts = user_msg_lower.split(pattern)
-                    if len(parts) > 1:
-                        entity_name = f'"{parts[1].strip()}"'
-                    break
+        intent = intent_classification.get("intent", "database_query")
+        confidence = intent_classification.get("confidence", 0.5)
+        reasoning = intent_classification.get("reasoning", "")
 
-            logger.info(f"Ambiguous entity detected: {entity_name}")
+        logger.info(f"Intent: {intent} | Confidence: {confidence} | Reasoning: {reasoning}")
+
+        # GATE 3 HANDLER: Clarification Needed
+        if intent == "clarification_needed" and confidence > 0.7:
+            logger.info(f"LLM classified as ambiguous: {reasoning}")
             execution_time = (datetime.now() - start_time).total_seconds()
 
-            disambiguation_response = f"""I found records related to {entity_name} in this database.
+            clarification_response = f"""I need a bit more context to help you.
 
-This name may correspond to multiple records or entities.
+{reasoning}
 
-To continue, you can:
-• ask for a summary from the database
-• request specific fields
-• add filters to narrow the result"""
-
-            return ChatResponse(
-                response=disambiguation_response,
-                session_id=session_id,
-                sql_query=None,
-                query_results=None,
-                data=None,
-                execution_time=execution_time,
-                clarification_needed=True,
-                error=None,
-            )
-
-        # GATE 4: Database Query Intent Check (CRITICAL - prevents non-SQL queries from timing out)
-        # Only route to SQL agent if user explicitly wants to retrieve/analyze data
-        has_database_intent = has_database_action
-
-        # GATE 4 HANDLER: No Database Intent → General Clarification Response
-        if not has_database_intent:
-            logger.info(f"No clear database intent detected: {message.message}")
-            execution_time = (datetime.now() - start_time).total_seconds()
-
-            clarification_response = """I can query the database, but I need more context.
-
-What would you like to do with this information?
-
-**Examples:**
+**Examples of what you can ask:**
 - "Show me flights departing from JFK"
 - "Count total bookings"
 - "Find top 10 passengers with most points"
@@ -1030,10 +1022,82 @@ What would you like to do with this information?
             )
 
         # ===================================================================
-        # SQL AGENT EXECUTION - Only reached if clear database action detected
-        # (Passed all 4 gates: not viz, not greeting, not ambiguous, has action)
+        # SQL AGENT EXECUTION - Route to agent if LLM classified as database_query
+        # (Passed all gates: not viz, not greeting, not needing clarification)
+
+        # If LLM says it's NOT a database query, provide general response
+        if intent != "database_query":
+            logger.info(f"LLM classified as '{intent}' - not routing to SQL agent")
+            execution_time = (datetime.now() - start_time).total_seconds()
+
+            general_response = f"""I'm a database query assistant. {reasoning}
+
+Ask me to query the database and I'll help you retrieve information."""
+
+            return ChatResponse(
+                response=general_response,
+                session_id=session_id,
+                sql_query=None,
+                query_results=None,
+                data=None,
+                execution_time=execution_time,
+                clarification_needed=False,
+                error=None,
+            )
+
         # ===================================================================
-        logger.info(f"Database action confirmed - checking query complexity")
+        # SQL AGENT EXECUTION - LLM classified this as a database query
+        logger.info(f"✓ LLM classified as database_query - routing to SQL agent")
+        logger.info(f"Checking query complexity before agent execution...")
+
+        # ===================================================================
+        # DJPI: DYNAMIC JOIN PATH INFERENCE (Database-Agnostic, Autonomous)
+        # Detects multi-table queries and provides join guidance to the LLM
+        # This prevents agent timeout by eliminating trial-and-error joins
+        # ===================================================================
+        join_guidance = None  # Will be injected into agent context if needed
+
+        try:
+            # Step 1: Use LLM to identify which tables are involved (AUTONOMOUS)
+            available_tables = list(schema_graph.tables) if schema_graph else []
+
+            if available_tables:
+                logger.info(f"🔍 DJPI: Analyzing query for table identification...")
+
+                table_analysis = identify_tables_for_query(
+                    llm=llm,
+                    user_query=message.message,
+                    available_tables=available_tables
+                )
+
+                # Step 2: If different tables needed, find join path (DETERMINISTIC)
+                if table_analysis.get("needs_join", False):
+                    primary_table = table_analysis.get("primary_table")
+                    metric_table = table_analysis.get("metric_table")
+
+                    if primary_table and metric_table and primary_table != metric_table:
+                        logger.info(f"🔗 DJPI v3: Finding join path: {primary_table} → {metric_table}")
+
+                        # ✅ DJPI v3: HARD cap at 4 hops (prevents timeouts from excessive joins)
+                        join_path = schema_graph.find_join_path(
+                            source_table=primary_table,
+                            target_table=metric_table,
+                            max_depth=4  # DJPI v3: Reduced from 5 to 4 (HARD limit)
+                        )
+
+                        # Step 3: Format guidance for the agent (NOT SQL!)
+                        if join_path:
+                            join_guidance = format_join_guidance(join_path)
+                            logger.info(f"✓ DJPI: Join path discovered ({len(join_path)} hops)")
+                        else:
+                            logger.warning(f"⚠️ DJPI: No join path exists between {primary_table} and {metric_table}")
+                            # Don't fail - let agent try anyway
+                else:
+                    logger.info(f"✓ DJPI: Single-table query detected, no join needed")
+
+        except Exception as e:
+            logger.error(f"DJPI failed (non-fatal): {str(e)}")
+            # DJPI failure is non-fatal - agent can still try without guidance
 
         # ===================================================================
         # QUERY GOVERNANCE - Analytical Complexity Classification
@@ -1077,10 +1141,17 @@ What would you like to do with this information?
         # Reset analytical context before new SQL execution
         reset_analytical_context(session, reason="new_sql_query")
 
+        # DJPI: Inject join guidance into agent context if discovered
+        agent_input = message.message
+        if join_guidance:
+            logger.info(f"💉 DJPI: Injecting join guidance into agent context")
+            # Prepend guidance as a system-level hint (NOT SQL!)
+            agent_input = f"{join_guidance}\n\nUSER QUERY: {message.message}"
+
         # Execute query through agent with timeout
         try:
             response = await asyncio.wait_for(
-                session_agent.achat(message.message),
+                session_agent.achat(agent_input),
                 timeout=35,  # Groq can be slower on complex queries with joins
             )
             response_text = str(response)
@@ -1216,8 +1287,8 @@ async def get_models():
     return {
         "model": GROQ_MODEL,
         "provider": "Groq",
-        "architecture": "Single LLM for all tasks",
-        "version": "4.1",
+        "architecture": "DJPI v3 + ReActAgent + Query Governance",
+        "version": "4.3",
     }
 
 
@@ -1270,9 +1341,10 @@ async def get_agent_info():
             "multi_turn_memory": True,
             "split_visualization_architecture": True,
             "session_management": True,
-            "no_viz_timeouts": True,
+            "djpi_v3": True,
+            "query_governance": True,
         },
-        "version": "4.2",
+        "version": "4.3",
     }
 
 

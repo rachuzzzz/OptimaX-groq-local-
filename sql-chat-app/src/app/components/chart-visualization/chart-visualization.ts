@@ -35,36 +35,97 @@ export class ChartVisualizationComponent implements AfterViewInit {
   showChart = true;
 
   ngAfterViewInit() {
-    if (this.chartData) {
-      this.currentType = this.chartData.type || this.chartType;
+    if (this.chartData && this.validateChartData()) {
+      // Validate chart type before rendering
+      const validTypes: ChartType[] = ['bar', 'line', 'pie', 'doughnut'];
+      const requestedType = this.chartData.type || this.chartType;
+
+      if (validTypes.includes(requestedType)) {
+        this.currentType = requestedType;
+      } else {
+        console.warn(`Invalid chart type "${requestedType}". Falling back to "bar".`);
+        this.currentType = 'bar';
+        this.chartData.type = 'bar';
+      }
+
       setTimeout(() => this.renderChart(), 100);
+    } else {
+      console.error('Invalid chart data provided:', this.chartData);
     }
   }
 
+  /**
+   * Validate that chart data is properly structured
+   */
+  validateChartData(): boolean {
+    if (!this.chartData) {
+      console.error('Chart data is undefined');
+      return false;
+    }
+    if (!this.chartData.labels || this.chartData.labels.length === 0) {
+      console.error('Chart data has no labels');
+      return false;
+    }
+    if (!this.chartData.datasets || this.chartData.datasets.length === 0) {
+      console.error('Chart data has no datasets');
+      return false;
+    }
+    return true;
+  }
+
   renderChart() {
+    console.log(`[Chart Visualization] Rendering chart type: ${this.currentType}`);
+
     if (this.chart) {
       this.chart.destroy();
     }
 
+    if (!this.validateChartData()) {
+      console.error('[Chart Visualization] Cannot render chart: invalid data');
+      return;
+    }
+
     const ctx = this.chartCanvas.nativeElement.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) {
+      console.error('[Chart Visualization] Failed to get canvas context');
+      return;
+    }
+
+    console.log(`[Chart Visualization] Chart data:`, {
+      type: this.currentType,
+      labelCount: this.chartData.labels.length,
+      datasetCount: this.chartData.datasets.length,
+      labels: this.chartData.labels.slice(0, 5) // Log first 5 labels
+    });
 
     const config: ChartConfiguration = {
       type: this.currentType,
       data: {
         labels: this.chartData.labels,
-        datasets: this.chartData.datasets.map(dataset => ({
+        datasets: this.chartData.datasets.map((dataset, index) => ({
           ...dataset,
-          backgroundColor: dataset.backgroundColor || this.getGoldGradient(ctx),
-          borderColor: dataset.borderColor || 'rgba(255, 215, 0, 1)',
-          borderWidth: dataset.borderWidth || 2
+          backgroundColor: dataset.backgroundColor || this.getColorGradient(ctx, index),
+          borderColor: dataset.borderColor || this.getSolidColor(index),
+          borderWidth: dataset.borderWidth || 2,
+          // Enhanced visual properties
+          tension: this.currentType === 'line' ? 0.4 : 0, // Smooth curves for line charts
+          fill: this.currentType === 'line' ? true : false, // Fill area under line charts
+          pointRadius: this.currentType === 'line' ? 4 : 0,
+          pointHoverRadius: this.currentType === 'line' ? 6 : 0,
+          pointBackgroundColor: dataset.borderColor || this.getSolidColor(index),
+          pointBorderColor: '#fff',
+          pointBorderWidth: 2,
         }))
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        interaction: {
+          intersect: false,
+          mode: 'index'
+        },
         animation: {
-          duration: 1000,
+          duration: 1200,
           easing: 'easeInOutQuart'
         },
         plugins: {
@@ -74,21 +135,49 @@ export class ChartVisualizationComponent implements AfterViewInit {
             labels: {
               color: '#e5e7eb',
               font: {
-                size: 12,
-                weight: 500
+                size: 13,
+                weight: 600,
+                family: "'Inter', sans-serif"
               },
-              padding: 15
+              padding: 20,
+              usePointStyle: true,
+              pointStyle: 'circle',
+              boxWidth: 8,
+              boxHeight: 8
             }
           },
           tooltip: {
-            backgroundColor: 'rgba(30, 30, 35, 0.95)',
-            titleColor: '#ffd700',
-            bodyColor: '#e5e7eb',
-            borderColor: 'rgba(212, 175, 55, 0.5)',
-            borderWidth: 1,
-            padding: 12,
+            enabled: true,
+            backgroundColor: 'rgba(17, 24, 39, 0.97)',
+            titleColor: '#f9fafb',
+            bodyColor: '#d1d5db',
+            borderColor: 'rgba(59, 130, 246, 0.5)',
+            borderWidth: 2,
+            padding: 16,
             displayColors: true,
-            boxPadding: 6
+            boxPadding: 8,
+            cornerRadius: 8,
+            titleFont: {
+              size: 14,
+              weight: 'bold'
+            },
+            bodyFont: {
+              size: 13
+            },
+            callbacks: {
+              label: (context: any) => {
+                let label = context.dataset.label || '';
+                if (label) {
+                  label += ': ';
+                }
+                if (context.parsed.y !== null) {
+                  label += new Intl.NumberFormat('en-US', {
+                    maximumFractionDigits: 2
+                  }).format(context.parsed.y);
+                }
+                return label;
+              }
+            }
           },
           zoom: {
             zoom: {
@@ -115,44 +204,117 @@ export class ChartVisualizationComponent implements AfterViewInit {
           y: {
             beginAtZero: true,
             grid: {
-              color: 'rgba(255, 215, 0, 0.1)'
+              color: 'rgba(107, 114, 128, 0.15)',
+              lineWidth: 1
+            },
+            border: {
+              display: false
             },
             ticks: {
               color: '#9ca3af',
               font: {
-                size: 11
+                size: 12,
+                weight: 500
+              },
+              padding: 8,
+              callback: function(value: any) {
+                return new Intl.NumberFormat('en-US', {
+                  notation: 'compact',
+                  maximumFractionDigits: 1
+                }).format(value);
               }
             }
           },
           x: {
             grid: {
-              color: 'rgba(255, 215, 0, 0.05)'
+              color: 'rgba(107, 114, 128, 0.08)',
+              lineWidth: 1
+            },
+            border: {
+              display: false
             },
             ticks: {
               color: '#9ca3af',
               font: {
-                size: 11
-              }
+                size: 12,
+                weight: 500
+              },
+              padding: 8,
+              maxRotation: 45,
+              minRotation: 0
             }
           }
         } : undefined
       }
     };
 
-    this.chart = new Chart(ctx, config);
+    try {
+      this.chart = new Chart(ctx, config);
+      console.log(`[Chart Visualization] ✓ Chart rendered successfully`);
+    } catch (error) {
+      console.error('[Chart Visualization] Failed to create chart:', error);
+      throw error;
+    }
   }
 
-  getGoldGradient(ctx: CanvasRenderingContext2D): CanvasGradient {
-    const gradient = ctx.createLinearGradient(0, 0, 0, 400);
-    gradient.addColorStop(0, 'rgba(255, 215, 0, 0.8)');
-    gradient.addColorStop(1, 'rgba(212, 175, 55, 0.6)');
+  /**
+   * Generate dynamic color gradients for chart datasets
+   */
+  getColorGradient(ctx: CanvasRenderingContext2D, index: number): CanvasGradient {
+    const canvas = this.chartCanvas.nativeElement;
+    const height = canvas.height || 400;
+    const gradient = ctx.createLinearGradient(0, 0, 0, height);
+
+    // Vibrant color palette matching the service
+    const colorStops = [
+      ['rgba(59, 130, 246, 0.8)', 'rgba(59, 130, 246, 0.2)'],    // Blue
+      ['rgba(16, 185, 129, 0.8)', 'rgba(16, 185, 129, 0.2)'],    // Emerald
+      ['rgba(249, 115, 22, 0.8)', 'rgba(249, 115, 22, 0.2)'],    // Orange
+      ['rgba(139, 92, 246, 0.8)', 'rgba(139, 92, 246, 0.2)'],    // Purple
+      ['rgba(236, 72, 153, 0.8)', 'rgba(236, 72, 153, 0.2)'],    // Pink
+      ['rgba(245, 158, 11, 0.8)', 'rgba(245, 158, 11, 0.2)'],    // Amber
+      ['rgba(20, 184, 166, 0.8)', 'rgba(20, 184, 166, 0.2)'],    // Teal
+      ['rgba(239, 68, 68, 0.8)', 'rgba(239, 68, 68, 0.2)'],      // Red
+    ];
+
+    const selectedColor = colorStops[index % colorStops.length];
+    gradient.addColorStop(0, selectedColor[0]);
+    gradient.addColorStop(1, selectedColor[1]);
+
     return gradient;
   }
 
+  /**
+   * Get solid color for borders and points
+   */
+  getSolidColor(index: number): string {
+    const solidColors = [
+      'rgba(59, 130, 246, 1)',     // Blue
+      'rgba(16, 185, 129, 1)',     // Emerald
+      'rgba(249, 115, 22, 1)',     // Orange
+      'rgba(139, 92, 246, 1)',     // Purple
+      'rgba(236, 72, 153, 1)',     // Pink
+      'rgba(245, 158, 11, 1)',     // Amber
+      'rgba(20, 184, 166, 1)',     // Teal
+      'rgba(239, 68, 68, 1)',      // Red
+    ];
+
+    return solidColors[index % solidColors.length];
+  }
+
   changeChartType(type: ChartType) {
+    if (this.currentType === type) {
+      return; // Already displaying this type
+    }
+
+    console.log(`Switching chart type from ${this.currentType} to ${type}`);
     this.currentType = type;
     this.chartData.type = type;
-    this.renderChart();
+
+    // Small delay for smooth transition
+    setTimeout(() => {
+      this.renderChart();
+    }, 50);
   }
 
   downloadChart() {
