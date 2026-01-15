@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database (Optional - for demo purposes)
+  postgres:
+    image: postgres:14-alpine
+    container_name: optimax-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-optimax_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - optimax-network
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./sql-chat-backend
+      dockerfile: Dockerfile
+    container_name: optimax-backend
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/optimax_db}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - optimax-network
+    restart: unless-stopped
+
+  # Angular Frontend
+  frontend:
+    build:
+      context: ./sql-chat-app
+      dockerfile: Dockerfile
+    container_name: optimax-frontend
+    ports:
+      - "4200:80"
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - optimax-network
+    restart: unless-stopped
+
+networks:
+  optimax-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
