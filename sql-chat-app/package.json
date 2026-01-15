@@ -31,8 +31,11 @@
     "@angular/router": "^20.3.0",
     "chart.js": "^4.5.0",
     "chartjs-plugin-zoom": "^2.2.0",
+    "file-saver": "^2.0.5",
     "hammerjs": "^2.0.8",
     "ng2-charts": "^8.0.0",
+    "ngx-toastr": "^19.1.0",
+    "prismjs": "^1.30.0",
     "rxjs": "~7.8.0",
     "tslib": "^2.3.0",
     "zone.js": "~0.15.0"

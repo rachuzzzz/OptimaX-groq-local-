@@ -1,4 +1,4 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, HostListener } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { trigger, state, style, transition, animate } from '@angular/animations';
@@ -6,6 +6,11 @@ import { ChatService, ChatResponse, AgentTask } from '../../services/chat.servic
 import { SystemPromptManagerComponent } from '../system-prompt-manager/system-prompt-manager';
 import { ChartVisualizationComponent, ChartData } from '../chart-visualization/chart-visualization';
 import { ChartDetectionService } from '../../services/chart-detection.service';
+import { ExportService } from '../../services/export.service';
+import { QueryExamplesService, QueryExample } from '../../services/query-examples.service';
+import { ToastrService } from 'ngx-toastr';
+import * as Prism from 'prismjs';
+import 'prismjs/components/prism-sql';
 
 interface Message {
   type: 'user' | 'ai' | 'thinking' | 'clarification';
@@ -209,15 +214,27 @@ Example patterns:
     'How many passengers are there in the database?'
   ];
 
+  // Quick Wins Package - New Properties
+  showQueryExamples: boolean = false;
+  queryExamples: QueryExample[] = [];
+  filteredExamples: QueryExample[] = [];
+  selectedCategory: string = 'all';
+
   constructor(
     private chatService: ChatService,
-    private chartDetectionService: ChartDetectionService
+    private chartDetectionService: ChartDetectionService,
+    private exportService: ExportService,
+    private queryExamplesService: QueryExamplesService,
+    private toastr: ToastrService
   ) {
     this.loadFromStorage();
     this.setGreeting();
 
     // Set agentic mode in service
     this.chatService.setAgenticMode(this.agenticMode);
+
+    // Load query examples (Quick Wins)
+    this.loadQueryExamples();
   }
 
   ngOnInit(): void {
@@ -1017,5 +1034,222 @@ Example patterns:
   fillExample(exampleUrl: string): void {
     this.newDatabaseUrl = exampleUrl;
     this.newConnectionResult = null;
+  }
+
+  // =========================================================================
+  // QUICK WINS PACKAGE - NEW METHODS
+  // =========================================================================
+
+  /**
+   * Load query examples based on current database
+   */
+  loadQueryExamples(): void {
+    // Try to detect database from schema or use default
+    const databaseName = this.databaseSchema?.database_name || 'postgres_air';
+    this.queryExamples = this.queryExamplesService.getExamplesForDatabase(databaseName);
+    this.filteredExamples = this.queryExamples;
+  }
+
+  /**
+   * Toggle query examples sidebar
+   */
+  toggleQueryExamples(): void {
+    this.showQueryExamples = !this.showQueryExamples;
+    if (this.showQueryExamples) {
+      this.loadQueryExamples();
+    }
+  }
+
+  /**
+   * Filter examples by category
+   */
+  filterExamplesByCategory(category: string): void {
+    this.selectedCategory = category;
+    if (category === 'all') {
+      this.filteredExamples = this.queryExamples;
+    } else {
+      this.filteredExamples = this.queryExamplesService.getExamplesByCategory(
+        this.queryExamples,
+        category
+      );
+    }
+  }
+
+  /**
+   * Use query example
+   */
+  useQueryExample(example: QueryExample): void {
+    this.userInput = example.query;
+    this.showQueryExamples = false;
+    this.toastr.info(`Example loaded: ${example.title}`, 'Query Example');
+  }
+
+  /**
+   * Copy SQL query to clipboard
+   */
+  async copySQLToClipboard(sqlQuery: string): Promise<void> {
+    try {
+      await this.exportService.copyToClipboard(sqlQuery);
+      this.toastr.success('SQL query copied to clipboard!', 'Success');
+    } catch (error) {
+      console.error('Failed to copy SQL:', error);
+      this.toastr.error('Failed to copy to clipboard', 'Error');
+    }
+  }
+
+  /**
+   * Copy response text to clipboard
+   */
+  async copyResponseToClipboard(content: string): Promise<void> {
+    try {
+      await this.exportService.copyToClipboard(content);
+      this.toastr.success('Response copied to clipboard!', 'Success');
+    } catch (error) {
+      console.error('Failed to copy response:', error);
+      this.toastr.error('Failed to copy to clipboard', 'Error');
+    }
+  }
+
+  /**
+   * Export query results to CSV
+   */
+  exportResultsToCSV(data: any[], message?: Message): void {
+    if (!data || data.length === 0) {
+      this.toastr.warning('No data to export', 'Warning');
+      return;
+    }
+
+    try {
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+      const filename = `query_results_${timestamp}.csv`;
+      this.exportService.exportToCSV(data, filename);
+      this.toastr.success(`Exported ${data.length} rows to CSV`, 'Export Success');
+    } catch (error) {
+      console.error('Export failed:', error);
+      this.toastr.error('Failed to export data', 'Export Error');
+    }
+  }
+
+  /**
+   * Export query results to JSON
+   */
+  exportResultsToJSON(data: any[], message?: Message): void {
+    if (!data || data.length === 0) {
+      this.toastr.warning('No data to export', 'Warning');
+      return;
+    }
+
+    try {
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+      const filename = `query_results_${timestamp}.json`;
+      this.exportService.exportToJSON(data, filename);
+      this.toastr.success(`Exported ${data.length} rows to JSON`, 'Export Success');
+    } catch (error) {
+      console.error('Export failed:', error);
+      this.toastr.error('Failed to export data', 'Export Error');
+    }
+  }
+
+  /**
+   * Export SQL query to .sql file
+   */
+  exportSQLQuery(sqlQuery: string): void {
+    if (!sqlQuery) {
+      this.toastr.warning('No SQL query to export', 'Warning');
+      return;
+    }
+
+    try {
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+      const filename = `query_${timestamp}.sql`;
+      this.exportService.exportSQLQuery(sqlQuery, filename);
+      this.toastr.success('SQL query exported', 'Export Success');
+    } catch (error) {
+      console.error('Export failed:', error);
+      this.toastr.error('Failed to export SQL', 'Export Error');
+    }
+  }
+
+  /**
+   * Highlight SQL syntax using Prism.js
+   */
+  highlightSQL(sqlQuery: string): string {
+    try {
+      return Prism.highlight(sqlQuery, Prism.languages.sql, 'sql');
+    } catch (error) {
+      console.error('Syntax highlighting failed:', error);
+      return sqlQuery; // Return original if highlighting fails
+    }
+  }
+
+  /**
+   * Keyboard shortcuts handler
+   */
+  @HostListener('document:keydown', ['$event'])
+  handleKeyboardShortcuts(event: KeyboardEvent): void {
+    // Ctrl+Enter or Cmd+Enter: Send message
+    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+      if (this.userInput.trim()) {
+        event.preventDefault();
+        this.sendMessage();
+      }
+    }
+
+    // Ctrl+K or Cmd+K: Clear chat
+    if ((event.ctrlKey || event.metaKey) && event.key === 'k') {
+      event.preventDefault();
+      this.clearChat();
+      this.toastr.info('Chat cleared', 'Info');
+    }
+
+    // Ctrl+E or Cmd+E: Toggle query examples
+    if ((event.ctrlKey || event.metaKey) && event.key === 'e') {
+      event.preventDefault();
+      this.toggleQueryExamples();
+    }
+
+    // Ctrl+H or Cmd+H: Toggle sidebar
+    if ((event.ctrlKey || event.metaKey) && event.key === 'h') {
+      event.preventDefault();
+      this.toggleSidebar();
+    }
+
+    // Escape: Close modals
+    if (event.key === 'Escape') {
+      this.showQueryExamples = false;
+      this.showDatabaseSettings = false;
+      this.showSystemPromptManager = false;
+      this.showDebugPanel = false;
+    }
+  }
+
+  /**
+   * Get category icon for query examples
+   */
+  getCategoryIcon(category: string): string {
+    const icons: { [key: string]: string } = {
+      'basic': '📄',
+      'aggregation': '📊',
+      'joins': '🔗',
+      'analytics': '📈',
+      'time': '⏰',
+      'all': '🌟'
+    };
+    return icons[category] || '📝';
+  }
+
+  /**
+   * Get category display name
+   */
+  getCategoryName(category: string): string {
+    const names: { [key: string]: string } = {
+      'basic': 'Basic Queries',
+      'aggregation': 'Aggregations',
+      'joins': 'Multi-Table',
+      'analytics': 'Analytics',
+      'time': 'Time-Based',
+      'all': 'All Examples'
+    };
+    return names[category] || category;
   }
 }
