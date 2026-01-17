@@ -1175,7 +1175,7 @@ Example patterns:
    */
   highlightSQL(sqlQuery: string): string {
     try {
-      return Prism.highlight(sqlQuery, Prism.languages.sql, 'sql');
+      return Prism.highlight(sqlQuery, Prism.languages['sql'], 'sql');
     } catch (error) {
       console.error('Syntax highlighting failed:', error);
       return sqlQuery; // Return original if highlighting fails

@@ -118,8 +118,15 @@ class SchemaGraph:
 
         # Strategy 1: Exact column name match with type compatibility
         for col_a, type_a in cols_a.items():
+            # FIX #2: Hard-ban timestamp columns - skip entirely (not just penalize)
+            if self._is_timestamp_column(col_a, type_a):
+                continue  # Do not consider this column for joins at all
+
             if col_a in cols_b:
                 type_b = cols_b[col_a]
+                # FIX #2: Also check target column
+                if self._is_timestamp_column(col_a, type_b):
+                    continue
                 if self._types_compatible(type_a, type_b):
                     # Same column name + compatible types = likely join key
                     relationships.append((col_a, col_a))
@@ -168,6 +175,49 @@ class SchemaGraph:
         """Check if column name suggests it's an ID/foreign key."""
         col_lower = col_name.lower()
         return col_lower.endswith("_id") or col_lower.endswith("_code")
+
+    def _is_timestamp_column(self, col_name: str, col_type: str) -> bool:
+        """
+        FIX #2: Hard-ban timestamp-based joins.
+
+        Completely exclude columns that are timestamp/date-related from join consideration.
+        These columns almost never represent valid foreign key relationships.
+
+        Returns:
+            True if column should be EXCLUDED from join inference
+        """
+        col_lower = col_name.lower()
+        type_lower = col_type.lower()
+
+        # Hard-ban patterns for column names
+        timestamp_name_patterns = [
+            "_ts",           # update_ts, create_ts
+            "timestamp",     # created_timestamp
+            "created_at",    # Rails convention
+            "updated_at",    # Rails convention
+            "modified_at",
+            "deleted_at",
+            "_date",         # flight_date, booking_date (unless it's an ID)
+            "_time",         # departure_time, arrival_time
+        ]
+
+        # Check if column name contains any timestamp pattern
+        for pattern in timestamp_name_patterns:
+            if pattern in col_lower:
+                # Exception: if it ends with _id, it's probably a foreign key
+                if col_lower.endswith("_id"):
+                    return False
+                return True
+
+        # Hard-ban based on data types (date/time types that aren't explicit FKs)
+        timestamp_types = ["timestamp", "datetime", "date", "time"]
+        for ts_type in timestamp_types:
+            if ts_type in type_lower:
+                # Only ban if column name doesn't suggest it's an ID
+                if not col_lower.endswith("_id") and not col_lower.endswith("_code"):
+                    return True
+
+        return False
 
     def _column_references_table(self, col_name: str, table_name: str) -> bool:
         """

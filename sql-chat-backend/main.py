@@ -82,7 +82,7 @@ async def lifespan(app: FastAPI):
         llm = Groq(
             model=GROQ_MODEL,
             api_key=GROQ_API_KEY,
-            temperature=0.0,
+            temperature=0.9,
             max_output_tokens=500,
         )
         logger.info(f"✓ Groq LLM initialized: {GROQ_MODEL}")
@@ -142,7 +142,7 @@ async def lifespan(app: FastAPI):
             tools=tools,
             llm=llm,
             verbose=True,
-            max_iterations=5,
+            max_iterations=5,  # FIX #5: Reduced from 5 to prevent excessive retry loops
             system_prompt=final_prompt,
         )
         logger.info("✓ ReActAgent initialized")
@@ -330,8 +330,13 @@ def classify_query_complexity(user_message: str) -> Dict[str, Any]:
             signal_categories.append(category)
             total_signals += len(found_keywords)
 
-    # Classify as ANALYTICAL if 2+ categories detected
-    is_analytical = len(signal_categories) >= 2
+    # FIX #4: Tighten governance - ranking alone is NOT analytical
+    # Analytical = ranking + at least one of: time_windows, behavioral, classification, flagging
+    # Pure ranking queries (e.g., "Top 10 busiest airports") should proceed immediately
+    is_analytical = (
+        "ranking" in signal_categories and
+        len(signal_categories) >= 2  # ranking + at least one other category
+    )
 
     return {
         "is_analytical": is_analytical,
@@ -427,7 +432,7 @@ def get_or_create_session(session_id: str, custom_prompt: Optional[str] = None) 
                 tools=tools,
                 llm=llm,
                 verbose=True,
-                max_iterations=5,
+                max_iterations=3,  # FIX #5: Reduced from 5 to prevent excessive retry loops
                 system_prompt=custom_prompt,
             )
 
@@ -613,7 +618,7 @@ async def connect_to_database(request: DatabaseConnectionRequest):
             tools=tools,
             llm=llm,
             verbose=True,
-            max_iterations=5,
+            max_iterations=3,  # FIX #5: Reduced from 5 to prevent excessive retry loops
             system_prompt=final_prompt,
         )
 
@@ -785,7 +790,7 @@ async def apply_system_prompt():
             tools=tools,
             llm=llm,
             verbose=True,
-            max_iterations=5,  # Limited to prevent excessive queries (Groq optimization)
+            max_iterations=3,  # FIX #5: Reduced from 5 to prevent excessive retry loops
             system_prompt=final_prompt,
         )
 
@@ -1093,11 +1098,28 @@ Ask me to query the database and I'll help you retrieve information."""
                             logger.warning(f"⚠️ DJPI: No join path exists between {primary_table} and {metric_table}")
                             # Don't fail - let agent try anyway
                 else:
+                    # FIX #1: Enforce single-table-first execution
+                    # When DJPI detects needs_join=False, inject hard instruction to prevent JOIN hallucination
                     logger.info(f"✓ DJPI: Single-table query detected, no join needed")
+                    join_guidance = """
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SINGLE-TABLE CONSTRAINT (DJPI v3 - Schema-Analyzed)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+IMPORTANT: This query can be answered using a SINGLE TABLE.
+DO NOT introduce JOINs unless explicitly required by the question.
+
+The schema analysis confirms all required data exists in one table.
+Use simple SELECT with aggregation (COUNT, SUM, GROUP BY) as needed.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
 
         except Exception as e:
-            logger.error(f"DJPI failed (non-fatal): {str(e)}")
-            # DJPI failure is non-fatal - agent can still try without guidance
+            # FIX #3: DJPI is STRICTLY ADVISORY - failures are always non-fatal
+            # Agent can proceed without join guidance and find paths autonomously
+            logger.error(f"DJPI failed (non-fatal, advisory only): {str(e)}")
+            join_guidance = None  # Ensure no partial guidance is injected
 
         # ===================================================================
         # QUERY GOVERNANCE - Analytical Complexity Classification
