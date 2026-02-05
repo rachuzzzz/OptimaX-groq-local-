@@ -21,6 +21,7 @@ sql-chat-backend/.env
 # OS files
 .DS_Store
 Thumbs.db
+nul
 
 # Logs
 *.log
