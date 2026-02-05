@@ -1,47 +1,133 @@
-# Python
+# ============================================================================
+# OptimaX Backend - Docker Ignore
+# ============================================================================
+# This file ensures NO host artifacts are copied into the Docker image.
+# The image must be fully self-contained.
+# ============================================================================
+
+# -----------------------------------------------------------------------------
+# Virtual Environments (CRITICAL - must not copy host venv)
+# -----------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.env/
+
+# -----------------------------------------------------------------------------
+# Environment Variables (injected at runtime, never baked in)
+# -----------------------------------------------------------------------------
+.env
+.env.*
+*.env
+.env.local
+.env.*.local
+
+# -----------------------------------------------------------------------------
+# Python Artifacts
+# -----------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
 *.egg-info/
+*.egg
 dist/
 build/
-*.egg
+eggs/
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
 
-# Virtual environments
-venv/
-env/
-ENV/
-
-# IDE
+# -----------------------------------------------------------------------------
+# IDE and Editor
+# -----------------------------------------------------------------------------
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
 
-# Environment variables
-.env.local
-.env.*.local
-
-# Testing
+# -----------------------------------------------------------------------------
+# Testing and Coverage
+# -----------------------------------------------------------------------------
 .pytest_cache/
 .coverage
 htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+nosetests.xml
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Git
-.git/
-.gitignore
-
-# Documentation
+# -----------------------------------------------------------------------------
+# Documentation (not needed in production image)
+# -----------------------------------------------------------------------------
 *.md
 docs/
+README*
+CHANGELOG*
+LICENSE*
 
-# Logs
+# -----------------------------------------------------------------------------
+# Git
+# -----------------------------------------------------------------------------
+.git/
+.gitignore
+.gitattributes
+
+# -----------------------------------------------------------------------------
+# OS Files
+# -----------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# -----------------------------------------------------------------------------
+# Logs and Temporary Files
+# -----------------------------------------------------------------------------
 *.log
 logs/
+tmp/
+temp/
+*.tmp
+*.temp
+nul
+
+# -----------------------------------------------------------------------------
+# Batch/Shell Scripts (Windows/Linux dev scripts)
+# -----------------------------------------------------------------------------
+*.bat
+*.sh
+*.ps1
+
+# -----------------------------------------------------------------------------
+# Custom Prompt Config (user-specific)
+# -----------------------------------------------------------------------------
+custom_system_prompt.txt
+
+# -----------------------------------------------------------------------------
+# Docker files (don't need Docker in Docker)
+# -----------------------------------------------------------------------------
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# -----------------------------------------------------------------------------
+# Verification scripts (keep docker-verify.py, exclude others)
+# -----------------------------------------------------------------------------
+verify-llamaindex.bat
+migrate-venv.bat
+setup-venv.ps1
+setup-venv.sh

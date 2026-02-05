@@ -1,6 +1,7 @@
 # Dependencies
 sql-chat-app/node_modules/
 sql-chat-backend/venv/
+sql-chat-backend/.venv/
 sql-chat-backend/__pycache__/
 
 # Build outputs
@@ -11,7 +12,8 @@ sql-chat-app/.angular/
 sql-chat-backend/.env
 
 # IDE files
-.vscode/
+# NOTE: .vscode/ is NOT ignored - settings.json and launch.json ensure
+# all developers use the same Python interpreter (environment hardening)
 .idea/
 *.swp
 *.swo

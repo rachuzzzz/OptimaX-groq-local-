@@ -1,24 +1,60 @@
-# OptimaX v4.0 - Simplified Single-LLM Architecture
-# Using Groq + LlamaIndex with focused tools
+# ============================================================================
+# OptimaX v6.1 - Locked Dependencies
+# ============================================================================
+# This file pins EXACT versions for reproducible builds.
+# Run: pip install -r requirements.txt
+# ============================================================================
 
-# Core Framework
+# -----------------------------------------------------------------------------
+# Core Web Framework
+# -----------------------------------------------------------------------------
+# FastAPI: High-performance async web framework for REST API endpoints
 fastapi==0.104.1
+# Uvicorn: ASGI server that runs FastAPI with async support
 uvicorn==0.24.0
+# Pydantic: Data validation and serialization for request/response models
 pydantic==2.8.0
 
-# LlamaIndex + Groq
+# -----------------------------------------------------------------------------
+# LlamaIndex NL-SQL Stack
+# -----------------------------------------------------------------------------
+# llama-index: Meta-package (ensures consistent versioning across sub-packages)
+llama-index==0.12.0
+# llama-index-core: Core abstractions for query engines, agents, indices
 llama-index-core==0.12.0
+# llama-index-llms-groq: Groq LLM integration for fast inference
 llama-index-llms-groq==0.3.0
 
-# Database
-psycopg2-binary==2.9.9
+# -----------------------------------------------------------------------------
+# Database Layer
+# -----------------------------------------------------------------------------
+# SQLAlchemy: ORM and SQL toolkit, used by LlamaIndex's SQLDatabase
 sqlalchemy==2.0.23
+# psycopg2-binary: PostgreSQL adapter (binary wheels for easy install)
+psycopg2-binary==2.9.9
 
+# -----------------------------------------------------------------------------
 # Data Processing
+# -----------------------------------------------------------------------------
+# Pandas: DataFrame operations for query result processing
 pandas==2.1.4
 
+# -----------------------------------------------------------------------------
 # Utilities
+# -----------------------------------------------------------------------------
+# python-dotenv: Load environment variables from .env files
 python-dotenv==1.0.0
+# sqlparse: SQL parsing for query validation and formatting
 sqlparse==0.4.4
+# requests: HTTP client for external API calls
 requests==2.31.0
+# aiohttp: Async HTTP client for non-blocking requests
 aiohttp==3.9.1
+
+# -----------------------------------------------------------------------------
+# Development (Optional)
+# -----------------------------------------------------------------------------
+# pytest: Testing framework
+pytest>=7.4.0
+# httpx: Async HTTP client for testing FastAPI
+httpx>=0.25.0

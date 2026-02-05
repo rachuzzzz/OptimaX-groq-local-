@@ -2,27 +2,45 @@
 Dynamic Join Path Inference (DJPI) v3 - Database-Agnostic Join Discovery
 =========================================================================
 
+==========================================================================
+v5.0 ARCHITECTURAL NOTE - ADVISORY MODE ONLY
+==========================================================================
+As of OptimaX v5.0, DJPI operates in ADVISORY MODE ONLY:
+
+- DJPI does NOT inject guidance into LLM prompts
+- DJPI does NOT influence SQL generation
+- SQL generation is now handled by LlamaIndex's NLSQLTableQueryEngine
+
+DJPI is retained for:
+[OK] Join path explanation / explainability
+[OK] Single-table vs multi-table detection (logged for debugging)
+[OK] Interpretability and debugging
+[OK] Future analytics and governance insights
+
+DJPI failures are completely NON-BLOCKING - they never affect SQL execution.
+==========================================================================
+
 Purpose:
-- Solves multi-table analytical query timeouts by inferring valid join paths
-- Guides the LLM with relational constraints (NOT SQL injection)
-- Fully deterministic join discovery + LLM-driven table identification
+- Provides join path analysis for explainability and debugging
+- Identifies single-table vs multi-table queries
+- Logs relationship discovery for interpretability
 
 Design Principles:
 1. Database Agnostic: Uses runtime schema introspection only
 2. Deterministic: Rule-based column/type matching for join paths
-3. Autonomous: LLM identifies which tables to connect
-4. Additive: Doesn't modify existing flows
+3. Advisory Only (v5.0): Output is logged, not injected
+4. Non-Blocking: Failures never affect query execution
 5. Conservative: Minimal overhead, optional execution
 
-DJPI v3 Enhancements:
-✓ Acyclic path enforcement (no table visited twice)
-✓ Strengthened join scoring with timestamp penalties
-✓ Cost-aware path selection (max depth: 4 hops)
-✓ Enhanced debug logging for rejected paths
-✓ Improved guidance format with explicit constraints
+DJPI v3 Features (now advisory):
+[OK] Acyclic path enforcement (no table visited twice)
+[OK] Strengthened join scoring with timestamp penalties
+[OK] Cost-aware path selection (max depth: 4 hops)
+[OK] Enhanced debug logging for rejected paths
+[OK] Improved guidance format with explicit constraints
 
 Author: OptimaX Team
-Version: 3.0 (DJPI v3)
+Version: 3.0 (DJPI v3) - Advisory Mode in v5.0
 """
 
 from typing import Dict, List, Optional, Tuple, Set
@@ -96,10 +114,10 @@ class SchemaGraph:
                     self.graph[table_b].append((table_a, col_b, col_a, score))
                     relationship_count += 1
 
-                    # ✅ DJPI v3 DEBUG: Log all discovered edges with scores
-                    logger.info(f"  Edge: {table_a}.{col_a} ↔ {table_b}.{col_b} (score: {score:.2f})")
+                    # DJPI v3 DEBUG: Log all discovered edges with scores
+                    logger.info(f"  Edge: {table_a}.{col_a} <-> {table_b}.{col_b} (score: {score:.2f})")
 
-        logger.info(f"✓ Schema graph built: {relationship_count} relationships discovered")
+        logger.info(f"[OK] Schema graph built: {relationship_count} relationships discovered")
 
     def _infer_relationships(
         self,
@@ -132,7 +150,7 @@ class SchemaGraph:
                     relationships.append((col_a, col_a))
 
         # Strategy 2: Foreign key naming convention
-        # Example: frequent_flyer_id in account → frequent_flyer.frequent_flyer_id
+        # Example: frequent_flyer_id in account -> frequent_flyer.frequent_flyer_id
         for col_a, type_a in cols_a.items():
             if self._is_id_column(col_a):
                 # Check if col_a references table_b
@@ -473,7 +491,7 @@ class SchemaGraph:
         # ✅ DJPI v3 FIX #3: Cost-aware path selection
         # Select best path from all candidates
         if not all_paths_to_target:
-            logger.warning(f"No join path found: {source_table} → {target_table}")
+            logger.warning(f"No join path found: {source_table} -> {target_table}")
 
             # ✅ DJPI v3 FIX #4: Enhanced debug logging
             if rejected_paths:
@@ -496,15 +514,15 @@ class SchemaGraph:
 
         # ✅ DJPI v3 FIX #4: Enhanced debug logging
         if len(all_paths_to_target) > 1:
-            logger.info(f"✓ Join path selected: {source_table} → {target_table} (score: {best_score:.1f}, {best_hop_count} hops)")
+            logger.info(f"[OK] Join path selected: {source_table} -> {target_table} (score: {best_score:.1f}, {best_hop_count} hops)")
             logger.debug(f"  Selected path details:")
             for i, (from_t, from_c, to_t, to_c) in enumerate(best_path, 1):
-                logger.debug(f"    {i}. {from_t}.{from_c} → {to_t}.{to_c}")
+                logger.debug(f"    {i}. {from_t}.{from_c} -> {to_t}.{to_c}")
 
             # Log rejected alternatives
             logger.debug(f"  Considered {len(all_paths_to_target)} alternative path(s):")
             for score, hops, alt_path in all_paths_to_target[1:4]:  # Show top 3 alternatives
-                path_str = " → ".join([alt_path[0][0]] + [step[2] for step in alt_path])
+                path_str = " -> ".join([alt_path[0][0]] + [step[2] for step in alt_path])
                 logger.debug(f"    Score {score:.1f} ({hops} hops): {path_str}")
 
             # Show cycle rejections if any
@@ -512,7 +530,7 @@ class SchemaGraph:
             if cycle_rejections:
                 logger.debug(f"  Rejected {len(cycle_rejections)} path(s) due to cycles")
         else:
-            logger.info(f"✓ Join path found: {source_table} → {target_table} (score: {best_score:.1f}, {best_hop_count} hops)")
+            logger.info(f"[OK] Join path found: {source_table} -> {target_table} (score: {best_score:.1f}, {best_hop_count} hops)")
 
         return best_path
 
@@ -546,7 +564,7 @@ RELATIONAL GUIDANCE (DJPI v3 - Schema-Discovered)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 REQUIRED JOIN PATH:
-{' → '.join(tables_involved)}
+{' -> '.join(tables_involved)}
 
 JOIN SPECIFICATIONS (use these EXACT relationships):
 """
@@ -556,10 +574,10 @@ JOIN SPECIFICATIONS (use these EXACT relationships):
 
     guidance += f"""
 CRITICAL CONSTRAINTS:
-✓ Use ONLY identity-based joins ({len(join_path)} join{'s' if len(join_path) != 1 else ''} required)
-✓ Do NOT repeat tables in your JOIN chain (acyclic path enforced)
-✓ Do NOT use attribute joins (email, name, etc.) or timestamp joins
-✓ Follow the exact path above - shortest valid path with highest confidence
+[OK] Use ONLY identity-based joins ({len(join_path)} join{'s' if len(join_path) != 1 else ''} required)
+[OK] Do NOT repeat tables in your JOIN chain (acyclic path enforced)
+[OK] Do NOT use attribute joins (email, name, etc.) or timestamp joins
+[OK] Follow the exact path above - shortest valid path with highest confidence
 
 REMINDER:
 - Use schema prefix if required (check schema section in your system prompt)
@@ -634,7 +652,7 @@ Respond with ONLY the JSON object, nothing else."""
             logger.warning(f"LLM suggested invalid metric_table: {result['metric_table']}")
             return {"needs_join": False}
 
-        logger.info(f"✓ LLM identified tables: {result['primary_table']} → {result['metric_table']}")
+        logger.info(f"[OK] LLM identified tables: {result['primary_table']} -> {result['metric_table']}")
         logger.info(f"  Reasoning: {result.get('reasoning', 'N/A')}")
 
         return result

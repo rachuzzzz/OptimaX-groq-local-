@@ -1,23 +1,33 @@
 """
-OptimaX Tools - SQL Tools + Visualization Classifier
-=====================================================
+OptimaX Tools - Database Management & SQL Utilities
 
-Tools:
-1. SQL Query Execution (via ReActAgent)
-2. One-shot Visualization Classification
-3. LLM-based Intent Classification
-
-Author: OptimaX Team
-Version: 4.3 (DJPI v3 + Query Governance)
+Provides:
+- DatabaseManager: Schema loading, query execution, FK metadata
+- Visualization classification (one-shot LLM)
+- Query intent classification
 """
 
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from sqlalchemy import create_engine, text, inspect
 import sqlparse
 import re
 import json
 from llama_index.core.tools import FunctionTool
+
+# Optional semantic hints (graceful degradation if unavailable)
+try:
+    from semantic_hints import (
+        SemanticHintEngine,
+        TableSemanticHint,
+        generate_table_info_dict,
+    )
+    SEMANTIC_HINTS_AVAILABLE = True
+except ImportError:
+    SEMANTIC_HINTS_AVAILABLE = False
+
+# Import pure aggregate query detector (v6.10)
+from sql_validator import is_pure_aggregate_query
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +39,15 @@ _last_chart_config = None
 class DatabaseManager:
     """Manages database connection and schema information"""
 
+    # =========================================================================
+    # v6.9: Configurable Cost Guard Thresholds
+    # =========================================================================
+    # These thresholds control the preflight cost guard behavior.
+    # Queries with GROUP BY + LIMIT below SAFE_LIMIT_THRESHOLD are always allowed.
+    # =========================================================================
+    COST_THRESHOLD = 100000  # Max estimated rows before blocking
+    SAFE_LIMIT_THRESHOLD = 100  # LIMIT value considered safe for bounded aggregations
+
     def __init__(self, database_url: str):
         """Initialize database connection"""
         self.database_url = database_url
@@ -39,7 +58,7 @@ class DatabaseManager:
         logger.info(f"Database connected successfully (Schema: {self.active_schema or 'public'})")
 
     def _load_schema(self) -> Dict[str, Any]:
-        """Load database schema information"""
+        """Load database schema including columns and foreign keys."""
         try:
             inspector = inspect(self.engine)
             schema_info = {"tables": {}}
@@ -68,7 +87,10 @@ class DatabaseManager:
                 self.active_schema = None  # No schema prefix needed
                 logger.info("Database doesn't use schemas - loading tables without prefix")
 
-            # Load all tables
+            # Track FK count for logging
+            total_fk_count = 0
+
+            # Load all tables with columns and foreign keys
             for table in tables:
                 if self.active_schema:
                     columns = inspector.get_columns(table, schema=self.active_schema)
@@ -76,6 +98,39 @@ class DatabaseManager:
                 else:
                     columns = inspector.get_columns(table)
                     full_table_name = table
+
+                # Load foreign key relationships
+                foreign_keys = []
+                try:
+                    fk_list = inspector.get_foreign_keys(
+                        table,
+                        schema=self.active_schema if self.active_schema else None
+                    )
+                    for fk in fk_list:
+                        constrained_cols = fk.get("constrained_columns", [])
+                        referred_table = fk.get("referred_table")
+                        referred_cols = fk.get("referred_columns", [])
+                        referred_schema = fk.get("referred_schema")
+
+                        # Only process single-column FKs (compound FKs are rare)
+                        if len(constrained_cols) == 1 and len(referred_cols) == 1:
+                            # Build target table name with schema if present
+                            if referred_schema:
+                                target_table = f"{referred_schema}.{referred_table}"
+                            elif self.active_schema:
+                                target_table = f"{self.active_schema}.{referred_table}"
+                            else:
+                                target_table = referred_table
+
+                            foreign_keys.append({
+                                "column": constrained_cols[0],
+                                "target_table": target_table,
+                                "target_column": referred_cols[0]
+                            })
+                            total_fk_count += 1
+                except Exception as fk_err:
+                    # Non-fatal: some databases may not support FK introspection
+                    logger.debug(f"Could not load FKs for {table}: {fk_err}")
 
                 schema_info["tables"][full_table_name] = {
                     "columns": [
@@ -85,16 +140,92 @@ class DatabaseManager:
                             "nullable": col["nullable"],
                         }
                         for col in columns
-                    ]
+                    ],
+                    "foreign_keys": foreign_keys
                 }
 
             schema_name = self.active_schema or 'default'
-            logger.info(f"Schema loaded: {len(schema_info['tables'])} tables from '{schema_name}' schema")
+            logger.info(
+                f"Schema loaded: {len(schema_info['tables'])} tables, "
+                f"{total_fk_count} foreign keys from '{schema_name}' schema"
+            )
             return schema_info
 
         except Exception as e:
             logger.error(f"Failed to load schema: {str(e)}")
             return {"tables": {}}
+
+    def get_semantic_hints(self) -> Dict[str, str]:
+        """Generate semantic hints for tables based on column patterns."""
+        if not SEMANTIC_HINTS_AVAILABLE:
+            logger.warning(
+                "Semantic hints unavailable (module not found). "
+                "NL-SQL will operate without semantic context."
+            )
+            return {}
+
+        try:
+            # Generate hints using the database-agnostic engine
+            table_info = generate_table_info_dict(
+                self.schema,
+                min_confidence=0.3  # Filter low-confidence hints
+            )
+
+            if table_info:
+                logger.info(
+                    f"Generated semantic hints for {len(table_info)} tables"
+                )
+                # Log sample hints for debugging
+                for table, hint in list(table_info.items())[:3]:
+                    logger.debug(f"  {table}: {hint[:80]}...")
+            else:
+                logger.info("No semantic patterns detected (hints will be empty)")
+
+            return table_info
+
+        except Exception as e:
+            logger.warning(
+                f"Semantic hint generation failed (non-blocking): {str(e)}"
+            )
+            return {}
+
+    def get_semantic_hints_detailed(self) -> Dict[str, TableSemanticHint]:
+        """Get detailed semantic hints with confidence scores."""
+        if not SEMANTIC_HINTS_AVAILABLE:
+            return {}
+
+        try:
+            engine = SemanticHintEngine()
+            return engine.generate_hints_for_schema(self.schema)
+        except Exception as e:
+            logger.warning(f"Detailed hint generation failed: {str(e)}")
+            return {}
+
+    def get_all_table_names(self) -> List[str]:
+        """Get all fully-qualified table names."""
+        return list(self.schema["tables"].keys())
+
+    def get_tables_for_nl_sql(self) -> dict:
+        """Get table names (without schema prefix) and schema for NL-SQL init."""
+        raw_table_names = []
+        detected_schema = self.active_schema  # Already discovered during init
+
+        for full_name in self.schema["tables"].keys():
+            if "." in full_name:
+                # Extract table name after schema prefix
+                # e.g., "postgres_air.flight" -> "flight"
+                raw_table_names.append(full_name.split(".")[-1])
+            else:
+                raw_table_names.append(full_name)
+
+        return {
+            "tables": raw_table_names,
+            "schema": detected_schema
+        }
+
+    def get_table_names_without_schema(self) -> List[str]:
+        """Get table names without schema prefix."""
+        return self.get_tables_for_nl_sql()["tables"]
 
     def get_schema_text(self) -> str:
         """Get human-readable schema description"""
@@ -192,19 +323,122 @@ class DatabaseManager:
 
         return summary
 
-    def execute_query(self, sql: str, row_limit: int = 100) -> Dict[str, Any]:
-        """
-        Execute SQL query with safety validation
+    def _normalize_sql_schema(self, sql: str) -> str:
+        """Qualify unqualified table names with the active schema (no-op if no schema)."""
+        # NO-OP if no active schema
+        if not self.active_schema:
+            return sql
 
-        Returns:
-            Dict with success, data, columns, row_count, or error
+        # Get known table names (without schema prefix)
+        known_tables = self.get_table_names_without_schema()
+
+        if not known_tables:
+            return sql
+
+        # Build schema prefix
+        schema_prefix = f"{self.active_schema}."
+
+        normalized_sql = sql
+
+        for table_name in known_tables:
+            # Skip if table name is empty
+            if not table_name:
+                continue
+
+            qualified_name = f"{schema_prefix}{table_name}"
+
+            # Pattern: (FROM|JOIN) + whitespace + unqualified table name + boundary
+            # We match table names followed by space, comma, semicolon, paren, or end
+            pattern = rf'(FROM|JOIN)(\s+)({re.escape(table_name)})(\s|,|;|\)|$)'
+
+            def replacer(match):
+                keyword = match.group(1)    # FROM or JOIN
+                space = match.group(2)      # Whitespace
+                table = match.group(3)      # Table name
+                suffix = match.group(4)     # Trailing char
+
+                # Return with schema prefix
+                return f"{keyword}{space}{schema_prefix}{table}{suffix}"
+
+            # Apply replacement
+            normalized_sql = re.sub(
+                pattern,
+                replacer,
+                normalized_sql,
+                flags=re.IGNORECASE
+            )
+
+        # Second pass: Remove any double-qualification that might have occurred
+        # (e.g., if schema.table was already in SQL and we added schema. again)
+        double_qualified = f"{schema_prefix}{schema_prefix}"
+        if double_qualified in normalized_sql:
+            normalized_sql = normalized_sql.replace(double_qualified, schema_prefix)
+
+        # Log if changes were made
+        if normalized_sql != sql:
+            logger.info(f"SQL schema normalized: added {self.active_schema} prefix to table names")
+            logger.debug(f"  Before: {sql[:100]}...")
+            logger.debug(f"  After:  {normalized_sql[:100]}...")
+
+        return normalized_sql
+
+    def execute_query(
+        self,
+        sql: str,
+        row_limit: int = 100,
+        cost_threshold: Optional[int] = None
+    ) -> Dict[str, Any]:
         """
-        # Validate SQL
-        is_valid, validated_sql = self._validate_sql(sql, row_limit)
+        Execute SQL with schema normalization, safety validation, and cost guard.
+
+        v6.8: Added preflight cost guard to abort expensive queries.
+        v6.9: BUG 1 FIX - Cost guard uses configurable class thresholds.
+
+        Args:
+            sql: SQL query to execute
+            row_limit: Maximum rows to return
+            cost_threshold: Maximum estimated rows before aborting (uses class constant if None)
+        """
+        print(f"[DB] execute_query called with: {sql[:80]}...", flush=True)
+        normalized_sql = self._normalize_sql_schema(sql)
+        is_valid, validated_sql = self._validate_sql(normalized_sql, row_limit)
         if not is_valid:
             return {
                 "success": False,
                 "error": f"SQL validation failed: {validated_sql}",
+            }
+
+        # =====================================================================
+        # v6.8: PREFLIGHT COST GUARD
+        # v6.9: BUG 1 FIX - Uses configurable thresholds from class constants
+        # =====================================================================
+        # Run EXPLAIN to estimate query cost BEFORE execution.
+        # Abort if estimated rows exceed threshold.
+        # This prevents timeout on expensive GROUP BY / full scan queries.
+        #
+        # CRITICAL (v6.9): Bounded aggregations (GROUP BY + LIMIT ≤ SAFE_LIMIT_THRESHOLD)
+        # are ALWAYS allowed, regardless of EXPLAIN estimate.
+        # =====================================================================
+        effective_cost_threshold = cost_threshold if cost_threshold is not None else self.COST_THRESHOLD
+        cost_check = self._preflight_cost_check(
+            validated_sql,
+            threshold=effective_cost_threshold,
+            safe_limit_threshold=self.SAFE_LIMIT_THRESHOLD
+        )
+        if not cost_check["safe"]:
+            logger.warning(
+                f"[GUARD] Query aborted: estimated rows too high "
+                f"({cost_check['estimated_rows']:,} > {effective_cost_threshold:,})"
+            )
+            return {
+                "success": False,
+                "error": (
+                    f"Query would scan too many rows ({cost_check['estimated_rows']:,} estimated). "
+                    f"Please narrow your query by adding filters (e.g., date range, specific ID, or route)."
+                ),
+                "error_type": "cost_guard",
+                "estimated_rows": cost_check["estimated_rows"],
+                "sql": validated_sql,
             }
 
         try:
@@ -294,6 +528,139 @@ class DatabaseManager:
 
         except Exception as e:
             return False, f"SQL validation error: {str(e)}"
+
+    def _preflight_cost_check(
+        self,
+        sql: str,
+        threshold: int = 100000,
+        safe_limit_threshold: int = 100
+    ) -> Dict[str, Any]:
+        """
+        Run EXPLAIN to estimate query cost before execution.
+
+        v6.8: Preflight cost guard to prevent expensive queries.
+        v6.9: BUG 1 FIX - Don't block bounded GROUP BY aggregations.
+
+        Args:
+            sql: Validated SQL query
+            threshold: Maximum estimated rows
+            safe_limit_threshold: LIMIT value considered safe for aggregations
+
+        Returns:
+            Dict with:
+                safe: Whether query is safe to execute
+                estimated_rows: Estimated row count from EXPLAIN
+                error: Error message if EXPLAIN failed
+        """
+        sql_upper = sql.upper()
+
+        # =====================================================================
+        # v6.10: PURE AGGREGATE QUERY EXCEPTION
+        # =====================================================================
+        # Pure aggregate queries (COUNT, SUM, AVG, MIN, MAX without GROUP BY)
+        # return exactly ONE ROW regardless of table size.
+        #
+        # Examples that bypass row-scan guard:
+        #   SELECT COUNT(*) FROM flight;
+        #   SELECT AVG(price) FROM booking;
+        #   SELECT MAX(age) FROM passenger;
+        #
+        # These queries do NOT materialize large result sets and are safe.
+        # =====================================================================
+        if is_pure_aggregate_query(sql):
+            print(f"[GUARD] Pure aggregate query detected - skipping cost check (returns exactly 1 row)", flush=True)
+            logger.info(
+                f"[GUARD] Pure aggregate query detected - skipping cost check "
+                f"(returns exactly 1 row)"
+            )
+            return {"safe": True, "estimated_rows": 1, "pure_aggregate": True}
+
+        # =====================================================================
+        # v6.9: BUG 1 FIX - Skip cost guard for bounded aggregations
+        # =====================================================================
+        # PostgreSQL EXPLAIN estimates rows BEFORE LIMIT is applied.
+        # A query like "SELECT ... GROUP BY ... LIMIT 10" may show 100k estimated
+        # rows (total groups), but will only return 10 rows.
+        #
+        # RULE: If query has GROUP BY AND LIMIT ≤ safe_limit_threshold,
+        #       it's a bounded top-N aggregation - allow execution.
+        # =====================================================================
+        has_group_by = 'GROUP BY' in sql_upper
+        has_limit = 'LIMIT' in sql_upper
+
+        if has_group_by and has_limit:
+            # Extract LIMIT value
+            limit_match = re.search(r'LIMIT\s+(\d+)', sql_upper)
+            if limit_match:
+                limit_value = int(limit_match.group(1))
+                if limit_value <= safe_limit_threshold:
+                    print(f"[GUARD] Bounded aggregation detected: GROUP BY + LIMIT {limit_value} (<= {safe_limit_threshold}) - skipping cost check", flush=True)
+                    logger.info(
+                        f"[GUARD] Bounded aggregation detected: GROUP BY + LIMIT {limit_value} "
+                        f"(<= {safe_limit_threshold}) - skipping cost check"
+                    )
+                    return {"safe": True, "estimated_rows": 0, "bounded_aggregation": True}
+
+        try:
+            # Remove trailing semicolon for EXPLAIN
+            sql_clean = sql.rstrip(';').strip()
+
+            # Build EXPLAIN query
+            # PostgreSQL: EXPLAIN returns plan with rows estimate
+            # MySQL: EXPLAIN returns rows column
+            explain_sql = f"EXPLAIN {sql_clean}"
+
+            with self.engine.connect() as conn:
+                result = conn.execute(text(explain_sql))
+                rows = result.fetchall()
+
+                if not rows:
+                    # No EXPLAIN result - allow execution (graceful degradation)
+                    logger.debug("[GUARD] EXPLAIN returned no rows - allowing execution")
+                    return {"safe": True, "estimated_rows": 0}
+
+                # Parse EXPLAIN output to extract row estimate
+                # PostgreSQL format: "Seq Scan on table  (cost=... rows=NNN ...)"
+                # MySQL format: has 'rows' column
+                estimated_rows = 0
+
+                # Try to extract from PostgreSQL text format
+                for row in rows:
+                    row_str = str(row)
+                    # Look for "rows=NNNN" pattern
+                    rows_match = re.search(r'rows=(\d+)', row_str)
+                    if rows_match:
+                        row_count = int(rows_match.group(1))
+                        estimated_rows = max(estimated_rows, row_count)
+
+                    # Also check for MySQL format (column named 'rows')
+                    if hasattr(row, '_mapping'):
+                        mapping = row._mapping
+                        if 'rows' in mapping and mapping['rows']:
+                            try:
+                                row_count = int(mapping['rows'])
+                                estimated_rows = max(estimated_rows, row_count)
+                            except (ValueError, TypeError):
+                                pass
+
+                print(f"[GUARD] EXPLAIN estimated rows: {estimated_rows:,}", flush=True)
+                logger.info(f"[GUARD] EXPLAIN estimated rows: {estimated_rows:,}")
+
+                if estimated_rows > threshold:
+                    return {
+                        "safe": False,
+                        "estimated_rows": estimated_rows,
+                    }
+
+                return {
+                    "safe": True,
+                    "estimated_rows": estimated_rows,
+                }
+
+        except Exception as e:
+            # EXPLAIN failed - log warning but allow execution (graceful degradation)
+            logger.warning(f"[GUARD] EXPLAIN failed (allowing execution): {str(e)}")
+            return {"safe": True, "estimated_rows": 0, "error": str(e)}
 
 
 # Tool creation functions for LlamaIndex Agent
@@ -388,6 +755,17 @@ def get_last_sql_result():
     return _last_sql_result
 
 
+def set_last_sql_result(result: Dict[str, Any]):
+    """
+    Set the last SQL result (used by NL-SQL engine in v5.0).
+
+    This function allows external callers (like the NL-SQL engine)
+    to store results in the same format as the ReActAgent tool.
+    """
+    global _last_sql_result
+    _last_sql_result = result
+
+
 def clear_last_sql_result():
     """Clear the last SQL result"""
     global _last_sql_result
@@ -466,7 +844,7 @@ Respond with ONLY the JSON object, nothing else."""
             response_text = response_text.split("```")[1].split("```")[0].strip()
 
         result = json.loads(response_text)
-        logger.info(f"✓ Intent classified: {result.get('intent')} (confidence: {result.get('confidence', 0)})")
+        logger.info(f"[OK] Intent classified: {result.get('intent')} (confidence: {result.get('confidence', 0)})")
         return result
 
     except Exception as e:
@@ -578,7 +956,7 @@ Respond with ONLY the JSON object, nothing else."""
                     {"type": "bar", "label": "Bar Chart", "recommended": True}
                 ]
 
-        logger.info(f"✓ Visualization classified: {result.get('analysis_type')} with {len(result.get('recommended_charts', []))} valid charts")
+        logger.info(f"[OK] Visualization classified: {result.get('analysis_type')} with {len(result.get('recommended_charts', []))} valid charts")
         return result
 
     except Exception as e:

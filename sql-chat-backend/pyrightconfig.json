@@ -1,0 +1,30 @@
+{
+    "include": [
+        "*.py"
+    ],
+    "exclude": [
+        ".venv",
+        "venv",
+        "__pycache__",
+        "*.pyc"
+    ],
+    "venvPath": ".",
+    "venv": ".venv",
+    "pythonVersion": "3.11",
+    "pythonPlatform": "Windows",
+    "typeCheckingMode": "basic",
+    "reportMissingImports": true,
+    "reportMissingTypeStubs": false,
+    "reportUnusedImport": "warning",
+    "reportUnusedVariable": "warning",
+    "reportDuplicateImport": "warning",
+    "executionEnvironments": [
+        {
+            "root": ".",
+            "pythonVersion": "3.11",
+            "extraPaths": [
+                "."
+            ]
+        }
+    ]
+}

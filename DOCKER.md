@@ -544,10 +544,72 @@ If you encounter issues:
 
 ---
 
+## ✅ Build-Time Verification
+
+The Docker build now includes a **fail-fast verification step** that ensures LlamaIndex NL-SQL is properly installed before the image can be built.
+
+### What Gets Verified at Build Time
+
+```
+[1/3] Verifying imports...
+  [OK] llama_index
+  [OK] llama_index.core
+  [OK] llama_index.core.query_engine
+  [OK] llama_index.llms.groq
+  [OK] fastapi
+  [OK] uvicorn
+  [OK] sqlalchemy
+
+[2/3] Verifying NL-SQL classes...
+  [OK] NLSQLTableQueryEngine
+  [OK] SQLDatabase
+  [OK] Settings
+  [OK] Groq
+
+[3/3] Verifying package versions...
+  [OK] llama-index==0.12.0
+  [OK] llama-index-core==0.12.0
+  [OK] llama-index-llms-groq==0.3.0
+```
+
+If ANY check fails, the Docker build fails immediately.
+
+### Runtime Verification Endpoints
+
+After the container is running:
+
+```bash
+# Basic health check
+curl http://localhost:8000/health
+
+# Detailed LlamaIndex verification
+curl http://localhost:8000/verify/llamaindex
+```
+
+### What Each Endpoint Proves
+
+| Endpoint | What It Proves |
+|----------|----------------|
+| `/health` returns `healthy` | Backend running, DB connected, NL-SQL engine initialized |
+| `/verify/llamaindex` returns `pass` | All imports work, versions correct, classes callable |
+
+---
+
+## 🔒 Security Features
+
+The production Dockerfile includes:
+
+- **Non-root user**: Container runs as `optimax` user (UID 1000)
+- **No secrets baked in**: Environment variables injected at runtime
+- **Minimal attack surface**: Using `python:3.11-slim` base image
+- **No dev artifacts**: `.venv`, `.env`, `.vscode` excluded via `.dockerignore`
+
+---
+
 <div align="center">
 
 **OptimaX Docker Setup**
-**Version:** 4.3.0
+**Version:** 6.1.0
 
 Built with Docker + Docker Compose
 

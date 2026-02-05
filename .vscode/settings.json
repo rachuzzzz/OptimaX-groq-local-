@@ -1,0 +1,61 @@
+{
+    // ============================================================================
+    // OptimaX - VS Code Python Environment Lock
+    // ============================================================================
+    // This file FORCES VS Code, Pylance, and the debugger to use the same Python
+    // interpreter. No more yellow underlines or environment ambiguity.
+    // ============================================================================
+
+    // Python interpreter: ABSOLUTE path to .venv inside sql-chat-backend
+    // This is the SINGLE SOURCE OF TRUTH for all Python operations
+    "python.defaultInterpreterPath": "${workspaceFolder}/sql-chat-backend/.venv/Scripts/python.exe",
+
+    // Pylance configuration - use the same interpreter for type checking
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/sql-chat-backend"
+    ],
+    "python.analysis.autoSearchPaths": true,
+    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.diagnosticMode": "workspace",
+
+    // Disable auto-detection to prevent VS Code from picking wrong interpreter
+    "python.experiments.optOutFrom": ["pythonDiscoveryModuleNew"],
+
+    // Terminal activation - ensure terminal uses the correct venv
+    "python.terminal.activateEnvironment": true,
+    "python.terminal.activateEnvInCurrentTerminal": true,
+
+    // Integrated terminal defaults for backend work
+    "terminal.integrated.cwd": "${workspaceFolder}/sql-chat-backend",
+
+    // Formatting and linting (uses same interpreter)
+    "python.formatting.provider": "none",
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter",
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+        }
+    },
+
+    // Files to exclude from search (avoid venv pollution)
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/*.pyc": true,
+        "**/sql-chat-backend/.venv": true,
+        "**/sql-chat-backend/venv": true,
+        "**/node_modules": true
+    },
+    "search.exclude": {
+        "**/sql-chat-backend/.venv": true,
+        "**/sql-chat-backend/venv": true,
+        "**/node_modules": true
+    },
+
+    // Ensure tests use the same interpreter
+    "python.testing.pytestEnabled": true,
+    "python.testing.cwd": "${workspaceFolder}/sql-chat-backend",
+    "python.testing.pytestArgs": [
+        "."
+    ]
+}

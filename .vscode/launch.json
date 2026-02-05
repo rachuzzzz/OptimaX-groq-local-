@@ -1,0 +1,72 @@
+{
+    // ============================================================================
+    // OptimaX - VS Code Debug Configuration
+    // ============================================================================
+    // All debug configurations use the SAME Python interpreter as Pylance.
+    // This eliminates debugger vs runtime interpreter mismatches.
+    // ============================================================================
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "OptimaX Backend (FastAPI/Uvicorn)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": [
+                "main:app",
+                "--host", "0.0.0.0",
+                "--port", "8000",
+                "--reload"
+            ],
+            "cwd": "${workspaceFolder}/sql-chat-backend",
+            "python": "${workspaceFolder}/sql-chat-backend/.venv/Scripts/python.exe",
+            "env": {
+                "PYTHONUNBUFFERED": "1",
+                "PYTHONDONTWRITEBYTECODE": "1"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/sql-chat-backend/.env"
+        },
+        {
+            "name": "OptimaX Backend (No Reload)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": [
+                "main:app",
+                "--host", "0.0.0.0",
+                "--port", "8000"
+            ],
+            "cwd": "${workspaceFolder}/sql-chat-backend",
+            "python": "${workspaceFolder}/sql-chat-backend/.venv/Scripts/python.exe",
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/sql-chat-backend/.env"
+        },
+        {
+            "name": "Python: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "cwd": "${workspaceFolder}/sql-chat-backend",
+            "python": "${workspaceFolder}/sql-chat-backend/.venv/Scripts/python.exe",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/sql-chat-backend/.env"
+        },
+        {
+            "name": "Environment Guard Check",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/sql-chat-backend/env_guard.py",
+            "cwd": "${workspaceFolder}/sql-chat-backend",
+            "python": "${workspaceFolder}/sql-chat-backend/.venv/Scripts/python.exe",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}
