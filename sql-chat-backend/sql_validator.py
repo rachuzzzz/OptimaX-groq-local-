@@ -32,6 +32,7 @@ Version: 5.0 (SQL Alias Validation)
 
 import re
 import logging
+import sqlparse
 from typing import Set, Tuple, List, Optional, Dict, Any
 from dataclasses import dataclass
 
@@ -1867,6 +1868,934 @@ def _split_select_clause(select_clause: str) -> list:
         items.append(''.join(current_item).strip())
 
     return items
+
+
+# =============================================================================
+# STRUCTURED ROUTE FILTER INJECTION (v6.12.1 - Relationally-Aware)
+# =============================================================================
+# PURPOSE:
+# Inject structured route constraints into generated SQL as WHERE conditions.
+# When the base table lacks route columns, use DJPI SchemaGraph.find_join_path()
+# to discover the join chain and inject the necessary JOINs.
+#
+# DESIGN PRINCIPLE:
+# Context binding operates on STRUCTURED STATE, not surface language.
+# Route constraints are stored as typed dicts, not appended to query strings.
+# Injection uses sqlparse for structural WHERE detection, then inserts
+# constraints at SQL clause boundaries.
+#
+# WHAT THIS IS NOT:
+# - NOT regex-based string replacement
+# - NOT query string augmentation
+# - NOT LLM-based rewriting
+# - NOT keyword matching
+# - NOT hardcoded join chains (uses DJPI graph discovery)
+#
+# ARCHITECTURAL POSITION:
+#   RCL Output -> [ROUTE FILTER INJECTION] -> Column Validation -> Execution
+# =============================================================================
+
+
+def _resolve_to_schema_graph_key(table_name: str, sg_tables) -> Optional[str]:
+    """
+    Case-insensitive lookup to map a table name to SchemaGraph key.
+
+    Handles schema-prefix matching: 'flight' matches 'postgres_air.flight'.
+
+    Args:
+        table_name: Table name from SQL (possibly lowercase, possibly schema-prefixed)
+        sg_tables: Set of table keys from SchemaGraph.tables
+
+    Returns:
+        Exact key from SchemaGraph.tables or None
+    """
+    name_lower = table_name.lower()
+    for key in sg_tables:
+        key_lower = key.lower()
+        if key_lower == name_lower:
+            return key
+        # Match short name to schema-prefixed key: 'flight' -> 'postgres_air.flight'
+        if key_lower.endswith(f".{name_lower}"):
+            return key
+    return None
+
+
+def _find_table_ref_in_sql(table_name_lower: str, table_aliases: Dict[str, str]) -> str:
+    """
+    Find the best SQL reference for a table given known aliases.
+
+    Prefers explicit alias (e.g. 'f') over bare table name.
+    Falls back to short table name if present.
+
+    Args:
+        table_name_lower: Lowercase table name (e.g. 'flight')
+        table_aliases: Dict from SQLParser.extract_tables_with_aliases()
+
+    Returns:
+        Best reference string to use in SQL
+    """
+    # Check for explicit alias (key != table short name, value matches table)
+    for alias, full_name in table_aliases.items():
+        full_lower = full_name.lower()
+        short_name = full_lower.split(".")[-1]
+        if short_name == table_name_lower and alias != short_name:
+            return alias
+
+    # Fall back to short table name if in aliases
+    if table_name_lower in table_aliases:
+        return table_name_lower
+
+    return table_name_lower
+
+
+def _inject_filter_expr_into_sql(sql: str, filter_expr: str) -> str:
+    """
+    Inject a WHERE/AND filter expression into SQL at the correct position.
+
+    Uses sqlparse for structural WHERE detection and regex for clause
+    boundary detection.
+
+    Args:
+        sql: SQL query (without trailing semicolon handling — caller strips)
+        filter_expr: Fully qualified filter expression
+
+    Returns:
+        SQL with filter injected
+    """
+    # Structural analysis: detect WHERE clause via sqlparse token tree
+    parsed = sqlparse.parse(sql)
+    if not parsed:
+        return sql
+
+    stmt = parsed[0]
+    has_where = any(
+        isinstance(token, sqlparse.sql.Where) for token in stmt.tokens
+    )
+
+    # Separate SQL body from trailing semicolon
+    sql_body = sql.rstrip()
+    had_semicolon = sql_body.endswith(';')
+    if had_semicolon:
+        sql_body = sql_body[:-1].rstrip()
+
+    # Find clause boundary: first post-WHERE keyword position
+    boundary_pattern = re.compile(
+        r'\b(GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|UNION|INTERSECT|EXCEPT|OFFSET)\b',
+        re.IGNORECASE,
+    )
+    match = boundary_pattern.search(sql_body)
+    insert_pos = match.start() if match else len(sql_body)
+
+    before = sql_body[:insert_pos].rstrip()
+    after = sql_body[insert_pos:]
+
+    if has_where:
+        result = f"{before} AND {filter_expr} {after}"
+    else:
+        result = f"{before} WHERE {filter_expr} {after}"
+
+    if had_semicolon:
+        result = result.rstrip() + ';'
+
+    return result
+
+
+def _inject_joins_and_filters(sql: str, join_clauses: List[str], filter_expr: str) -> str:
+    """
+    Insert JOIN clauses after FROM/existing JOINs and add WHERE filter.
+
+    Args:
+        sql: SQL query
+        join_clauses: List of JOIN clause strings (e.g. 'JOIN schema.table ON ...')
+        filter_expr: Fully qualified filter expression
+
+    Returns:
+        SQL with JOINs and filter injected
+    """
+    # Separate SQL body from trailing semicolon
+    sql_body = sql.rstrip()
+    had_semicolon = sql_body.endswith(';')
+    if had_semicolon:
+        sql_body = sql_body[:-1].rstrip()
+
+    # Find insertion point for JOINs: after FROM table and any existing JOINs,
+    # before WHERE/GROUP BY/ORDER BY/HAVING/LIMIT
+    boundary_pattern = re.compile(
+        r'\b(WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|UNION|INTERSECT|EXCEPT|OFFSET)\b',
+        re.IGNORECASE,
+    )
+    # Also find the last existing JOIN...ON clause to insert after it
+    join_end_pattern = re.compile(
+        r'\b(?:LEFT\s+|RIGHT\s+|INNER\s+|OUTER\s+|CROSS\s+|FULL\s+)?JOIN\b'
+        r'.*?\bON\b.*?(?=\b(?:LEFT\s+|RIGHT\s+|INNER\s+|OUTER\s+|CROSS\s+|FULL\s+)?JOIN\b'
+        r'|\bWHERE\b|\bGROUP\s+BY\b|\bORDER\s+BY\b|\bHAVING\b|\bLIMIT\b|$)',
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    # Find where to insert new JOINs
+    last_join_end = 0
+    for m in join_end_pattern.finditer(sql_body):
+        last_join_end = m.end()
+
+    if last_join_end > 0:
+        # Insert after the last existing JOIN
+        insert_pos = last_join_end
+    else:
+        # No existing JOINs — insert before first boundary keyword
+        boundary_match = boundary_pattern.search(sql_body)
+        if boundary_match:
+            insert_pos = boundary_match.start()
+        else:
+            insert_pos = len(sql_body)
+
+    before = sql_body[:insert_pos].rstrip()
+    after = sql_body[insert_pos:].lstrip()
+
+    join_block = " ".join(join_clauses)
+    reassembled = f"{before} {join_block} {after}".rstrip()
+
+    if had_semicolon:
+        reassembled = reassembled + ';'
+
+    # Now inject the filter expression
+    return _inject_filter_expr_into_sql(reassembled, filter_expr)
+
+
+# =============================================================================
+# SELECT COLUMN QUALIFICATION (v6.12.2 - Ambiguity Prevention)
+# =============================================================================
+# After relational JOIN injection, columns like booking_id may exist in BOTH
+# the base table and a joined table (e.g., booking AND booking_leg).
+# PostgreSQL raises "column reference is ambiguous".
+#
+# Fix: use sqlparse AST traversal to qualify unqualified column references
+# in the SELECT clause with the base table reference.
+#
+# This ONLY activates on the relational JOIN injection path.
+# Direct injection and legacy paths are unaffected.
+# =============================================================================
+
+
+def _qualify_paren_ast(
+    paren_token,
+    base_ref: str,
+    base_cols: set,
+) -> None:
+    """
+    Walk inside a Parenthesis AST node and qualify unqualified column names.
+
+    Handles function arguments like COUNT(booking_id), COUNT(DISTINCT booking_id),
+    and nested expressions.
+
+    Args:
+        paren_token: sqlparse Parenthesis token
+        base_ref: Table reference to prefix (e.g. 'booking' or 'b')
+        base_cols: Set of lowercase column names belonging to the base table
+    """
+    for child in paren_token.tokens:
+        if isinstance(child, sqlparse.sql.Identifier):
+            _qualify_identifier_ast(child, base_ref, base_cols)
+        elif isinstance(child, sqlparse.sql.IdentifierList):
+            for ident in child.get_identifiers():
+                _qualify_identifier_ast(ident, base_ref, base_cols)
+        elif isinstance(child, sqlparse.sql.Parenthesis):
+            _qualify_paren_ast(child, base_ref, base_cols)
+        elif child.ttype is sqlparse.tokens.Name:
+            # Bare Name token not wrapped in Identifier (rare but possible)
+            if child.value.lower() in base_cols:
+                child.value = f"{base_ref}.{child.value}"
+
+
+def _qualify_identifier_ast(
+    token,
+    base_ref: str,
+    base_cols: set,
+) -> None:
+    """
+    Qualify an unqualified column reference inside an Identifier AST node.
+
+    Decision tree per node type:
+    - Identifier with dot       → already qualified, skip
+    - Identifier wrapping Function → descend into Function parenthesis
+    - Identifier with bare Name → qualify if name matches base_cols
+    - Function                  → qualify inside parenthesis only (skip func name)
+    - Parenthesis               → delegate to _qualify_paren_ast
+
+    Args:
+        token: sqlparse AST node (Identifier, Function, or Parenthesis)
+        base_ref: Table reference to prefix
+        base_cols: Set of lowercase column names belonging to the base table
+    """
+    if isinstance(token, sqlparse.sql.Identifier):
+        # Already qualified? (has dot punctuation among direct children)
+        if any(
+            t.ttype is sqlparse.tokens.Punctuation and t.value == '.'
+            for t in token.tokens
+        ):
+            return
+
+        first = token.token_first(skip_cm=True, skip_ws=True)
+
+        # Wraps a Function (e.g., COUNT(...) AS alias) → descend into Function
+        if isinstance(first, sqlparse.sql.Function):
+            _qualify_identifier_ast(first, base_ref, base_cols)
+            return
+
+        # Bare column name (e.g., booking_id or price)
+        # Only the FIRST meaningful token is the column — anything after AS
+        # is an output alias and must NOT be touched.
+        if first and first.ttype is sqlparse.tokens.Name:
+            if first.value.lower() in base_cols:
+                first.value = f"{base_ref}.{first.value}"
+        return
+
+    if isinstance(token, sqlparse.sql.Function):
+        # Qualify inside parentheses only — tokens[0] is the function name, skip it
+        for child in token.tokens:
+            if isinstance(child, sqlparse.sql.Parenthesis):
+                _qualify_paren_ast(child, base_ref, base_cols)
+        return
+
+    if isinstance(token, sqlparse.sql.Parenthesis):
+        _qualify_paren_ast(token, base_ref, base_cols)
+        return
+
+
+def _qualify_select_columns(
+    sql: str,
+    base_table_ref: str,
+    base_columns: set,
+) -> str:
+    """
+    AST-level qualification of unqualified column references in SELECT and
+    GROUP BY clauses.
+
+    Uses sqlparse to parse the SQL into an AST, traverses the SELECT and
+    GROUP BY clause token trees, and prefixes unqualified column names that
+    belong to the base table with base_table_ref.
+
+    This prevents "column reference is ambiguous" errors after relational
+    JOIN injection introduces tables that share column names with the base table.
+
+    Args:
+        sql: SQL query string (with JOINs already injected)
+        base_table_ref: Table reference to prefix (alias if present, else table name)
+        base_columns: Set of column names belonging to the base table
+
+    Returns:
+        SQL with SELECT and GROUP BY columns qualified
+
+    Handles:
+        - COUNT(column), SUM(column), AVG(column), MIN(column), MAX(column)
+        - COUNT(DISTINCT column)
+        - Raw column selects (booking_id, price)
+        - Expressions with AS aliases (AVG(price) AS avg_price — alias untouched)
+        - Multiple select expressions (IdentifierList)
+        - Standalone Function tokens in SELECT (e.g., COUNT(col) without alias)
+        - GROUP BY column references (must match qualified SELECT columns)
+
+    Does NOT touch:
+        - Already qualified references (b.booking_id)
+        - Wildcards (*)
+        - WHERE clause, JOIN clause, ORDER BY
+        - Function names (COUNT, AVG, etc.)
+
+    Idempotent: running twice does not modify further (already-qualified
+    references are detected and skipped).
+    """
+    parsed = sqlparse.parse(sql)
+    if not parsed:
+        return sql
+
+    stmt = parsed[0]
+    base_cols_lower = {c.lower() for c in base_columns}
+
+    # =========================================================================
+    # Phase 1: Qualify SELECT clause columns
+    # =========================================================================
+    in_select = False
+    for token in stmt.tokens:
+        if token.ttype is sqlparse.tokens.DML and token.normalized == 'SELECT':
+            in_select = True
+            continue
+        if in_select:
+            if token.ttype is sqlparse.tokens.Keyword and token.normalized == 'FROM':
+                break
+            # Skip whitespace and DISTINCT keyword at clause level
+            if token.ttype in (
+                sqlparse.tokens.Whitespace,
+                sqlparse.tokens.Newline,
+            ):
+                continue
+            if token.ttype is sqlparse.tokens.Keyword and token.normalized == 'DISTINCT':
+                continue
+
+            # Process all possible token types in SELECT clause
+            if isinstance(token, sqlparse.sql.IdentifierList):
+                for ident in token.get_identifiers():
+                    _qualify_identifier_ast(ident, base_table_ref, base_cols_lower)
+            elif isinstance(token, sqlparse.sql.Identifier):
+                _qualify_identifier_ast(token, base_table_ref, base_cols_lower)
+            elif isinstance(token, sqlparse.sql.Function):
+                # Standalone Function (e.g., COUNT(booking_id) without AS alias)
+                # sqlparse may produce Function directly when there's no alias
+                _qualify_identifier_ast(token, base_table_ref, base_cols_lower)
+            elif isinstance(token, sqlparse.sql.Parenthesis):
+                # Standalone Parenthesis in SELECT (rare but possible)
+                _qualify_paren_ast(token, base_table_ref, base_cols_lower)
+            elif token.ttype is sqlparse.tokens.Name:
+                # Bare Name token (rare — usually wrapped in Identifier)
+                if token.value.lower() in base_cols_lower:
+                    token.value = f"{base_table_ref}.{token.value}"
+
+    # =========================================================================
+    # Phase 2: Qualify GROUP BY clause columns
+    # =========================================================================
+    # GROUP BY columns must match qualified SELECT columns. If SELECT has
+    # booking.booking_id but GROUP BY has unqualified booking_id, PostgreSQL
+    # raises an ambiguity error.
+    # =========================================================================
+    in_group_by = False
+    for token in stmt.tokens:
+        if token.ttype is sqlparse.tokens.Keyword:
+            normalized = token.normalized.upper() if token.normalized else ''
+            if normalized == 'GROUP BY':
+                in_group_by = True
+                continue
+            if in_group_by and normalized in (
+                'ORDER BY', 'HAVING', 'LIMIT', 'UNION',
+                'INTERSECT', 'EXCEPT', 'OFFSET', 'WINDOW',
+            ):
+                break
+        if in_group_by:
+            if token.ttype in (
+                sqlparse.tokens.Whitespace,
+                sqlparse.tokens.Newline,
+            ):
+                continue
+            if isinstance(token, sqlparse.sql.IdentifierList):
+                for ident in token.get_identifiers():
+                    _qualify_identifier_ast(ident, base_table_ref, base_cols_lower)
+            elif isinstance(token, sqlparse.sql.Identifier):
+                _qualify_identifier_ast(token, base_table_ref, base_cols_lower)
+            elif token.ttype is sqlparse.tokens.Name:
+                if token.value.lower() in base_cols_lower:
+                    token.value = f"{base_table_ref}.{token.value}"
+
+    return str(stmt)
+
+
+# =============================================================================
+# WHERE CLAUSE DEDUPLICATION (v6.12.3 - Idempotent Injection)
+# =============================================================================
+# When the LLM already includes route filter conditions in the WHERE clause,
+# structured injection must detect and skip duplicates. Otherwise the SQL
+# ends up with visually redundant predicates like:
+#   WHERE f.departure_airport = 'JFK' AND f.departure_airport = 'JFK'
+#
+# This layer uses sqlparse AST to:
+# 1. Extract existing equality predicates from the WHERE clause
+# 2. Canonicalize both existing and incoming predicates (resolving aliases)
+# 3. Inject only predicates that are genuinely missing
+#
+# Canonical form: (resolved_table_short.column, "=", "'literal'")
+# All components lowercased. Alias resolved via table_aliases dict.
+# =============================================================================
+
+
+def _collect_comparisons_ast(token) -> list:
+    """
+    Recursively collect all sqlparse.sql.Comparison nodes from a token tree.
+
+    Walks into Parenthesis, Where, and other grouping nodes.
+    Skips subqueries (nested SELECT statements).
+
+    Args:
+        token: Any sqlparse token or token list
+
+    Returns:
+        List of sqlparse.sql.Comparison instances
+    """
+    results = []
+    if isinstance(token, sqlparse.sql.Comparison):
+        results.append(token)
+        return results
+    if hasattr(token, 'tokens'):
+        for child in token.tokens:
+            # Skip subqueries — don't descend into nested SELECTs
+            if child.ttype is sqlparse.tokens.DML:
+                return results
+            results.extend(_collect_comparisons_ast(child))
+    return results
+
+
+def _canonicalize_column_ref(token, table_aliases: Dict[str, str]) -> Optional[str]:
+    """
+    Resolve an AST identifier token to canonical 'table_short.column' form.
+
+    Handles:
+        - Qualified: f.departure_airport → flight.departure_airport
+        - Unqualified: departure_airport → departure_airport
+
+    Args:
+        token: sqlparse Identifier or Name token
+        table_aliases: alias → full_table_name mapping
+
+    Returns:
+        Canonical lowercase string or None
+    """
+    if isinstance(token, sqlparse.sql.Identifier):
+        names = [
+            t.value for t in token.tokens
+            if t.ttype is sqlparse.tokens.Name
+        ]
+        if len(names) == 2:
+            qualifier = names[0].lower()
+            column = names[1].lower()
+            # Resolve alias to short table name
+            if qualifier in table_aliases:
+                resolved = table_aliases[qualifier].split(".")[-1].lower()
+                return f"{resolved}.{column}"
+            return f"{qualifier}.{column}"
+        elif len(names) == 1:
+            return names[0].lower()
+    elif token.ttype is sqlparse.tokens.Name:
+        return token.value.lower()
+    return None
+
+
+def _parse_comparison_to_canonical(
+    comp_token,
+    table_aliases: Dict[str, str],
+) -> Optional[tuple]:
+    """
+    Parse a single sqlparse.sql.Comparison into a canonical predicate tuple.
+
+    Only handles simple equality: <identifier> = <literal>
+    Returns None for anything else (non-equality, complex expressions).
+
+    Args:
+        comp_token: sqlparse.sql.Comparison node
+        table_aliases: alias → full_table_name mapping
+
+    Returns:
+        Tuple of (canonical_col_ref, "=", canonical_literal) or None
+    """
+    left = None
+    op = None
+    right = None
+
+    for token in comp_token.tokens:
+        if token.is_whitespace:
+            continue
+        if left is None:
+            left = token
+        elif op is None:
+            if token.ttype is sqlparse.tokens.Comparison:
+                op = token.value.strip()
+            else:
+                return None
+        elif right is None:
+            right = token
+            break
+
+    if not (left and op and right):
+        return None
+    if op != '=':
+        return None
+
+    col_ref = _canonicalize_column_ref(left, table_aliases)
+    if not col_ref:
+        return None
+
+    # Canonicalize literal — accept single-quoted strings and numbers
+    literal_val = None
+    if right.ttype is not None and right.ttype in sqlparse.tokens.Literal:
+        literal_val = right.value.lower()
+    elif right.ttype is sqlparse.tokens.Literal.String.Single:
+        literal_val = right.value.lower()
+
+    if not literal_val:
+        return None
+
+    return (col_ref, '=', literal_val)
+
+
+def _extract_where_predicates(
+    sql: str,
+    table_aliases: Dict[str, str],
+) -> set:
+    """
+    Extract canonical equality predicates from SQL WHERE clause via AST.
+
+    Parses the SQL, locates the WHERE clause, walks all Comparison nodes,
+    and returns a set of canonical tuples for equality predicates.
+
+    Args:
+        sql: SQL query string
+        table_aliases: alias → full_table_name mapping for alias resolution
+
+    Returns:
+        Set of (canonical_col_ref, "=", canonical_literal) tuples
+    """
+    parsed = sqlparse.parse(sql)
+    if not parsed:
+        return set()
+
+    stmt = parsed[0]
+
+    # Find WHERE clause
+    where_clause = None
+    for token in stmt.tokens:
+        if isinstance(token, sqlparse.sql.Where):
+            where_clause = token
+            break
+
+    if not where_clause:
+        return set()
+
+    # Collect all Comparison nodes from WHERE
+    comparisons = _collect_comparisons_ast(where_clause)
+
+    predicates = set()
+    for comp in comparisons:
+        canonical = _parse_comparison_to_canonical(comp, table_aliases)
+        if canonical:
+            predicates.add(canonical)
+
+    return predicates
+
+
+def _predicate_covered(
+    incoming: tuple,
+    existing_set: set,
+) -> bool:
+    """
+    Check if an incoming predicate is already covered by existing predicates.
+
+    Handles cross-matching between qualified and unqualified references:
+        - incoming 'flight.departure_airport' matches existing 'departure_airport'
+        - incoming 'departure_airport' matches existing 'flight.departure_airport'
+
+    Args:
+        incoming: Canonical tuple (col_ref, op, literal)
+        existing_set: Set of canonical tuples from WHERE clause
+
+    Returns:
+        True if the predicate already exists
+    """
+    if incoming in existing_set:
+        return True
+
+    col_ref, op, val = incoming
+
+    # Incoming is qualified → check if unqualified version exists
+    if '.' in col_ref:
+        bare_col = col_ref.split('.', 1)[1]
+        if (bare_col, op, val) in existing_set:
+            return True
+
+    # Incoming is unqualified → check if any qualified version matches
+    else:
+        for (ex_ref, ex_op, ex_val) in existing_set:
+            if ex_op == op and ex_val == val:
+                if '.' in ex_ref and ex_ref.split('.', 1)[1] == col_ref:
+                    return True
+
+    return False
+
+
+def _deduplicate_filter_conditions(
+    sql: str,
+    qualified_conditions: List[str],
+    table_aliases: Dict[str, str],
+) -> List[str]:
+    """
+    Remove filter conditions that already exist in the SQL WHERE clause.
+
+    Parses the SQL to extract existing WHERE predicates, canonicalizes each
+    incoming condition, and returns only conditions not already present.
+
+    Args:
+        sql: SQL query string
+        qualified_conditions: List of condition strings (e.g. "flight.departure_airport = 'JFK'")
+        table_aliases: alias → full_table_name mapping
+
+    Returns:
+        Filtered list of conditions to inject (may be empty)
+    """
+    existing = _extract_where_predicates(sql, table_aliases)
+    if not existing:
+        return qualified_conditions
+
+    remaining = []
+    for cond in qualified_conditions:
+        # Parse the condition string via sqlparse to get canonical form
+        parsed = sqlparse.parse(cond)
+        canonical = None
+        if parsed:
+            comps = _collect_comparisons_ast(parsed[0])
+            if comps:
+                canonical = _parse_comparison_to_canonical(comps[0], table_aliases)
+
+        if canonical and _predicate_covered(canonical, existing):
+            logger.info(f"[FILTER_INJECT] Skipping duplicate: {cond}")
+        else:
+            remaining.append(cond)
+
+    if not remaining and qualified_conditions:
+        logger.info(
+            "[FILTER_INJECT] Route filters already present — skipping injection"
+        )
+
+    return remaining
+
+
+def _inject_relationally_aware(
+    sql: str,
+    conditions: List[str],
+    column_names: List[str],
+    table_aliases: Dict[str, str],
+    primary_table: str,
+    schema_metadata,
+    schema_graph,
+) -> Optional[str]:
+    """
+    Main relational injection logic.
+
+    CASE 1 — Direct: primary table has all route columns -> qualify + inject.
+    CASE 2 — Relational: find target table via DJPI, add JOINs if needed.
+
+    Args:
+        sql: SQL query
+        conditions: List of unqualified condition strings (e.g. "col = 'VAL'")
+        column_names: List of column names in the conditions
+        table_aliases: Dict from SQLParser.extract_tables_with_aliases()
+        primary_table: Primary FROM table (may be schema-prefixed, e.g. 'postgres_air.booking')
+        schema_metadata: SchemaMetadata from relational_corrector
+        schema_graph: SchemaGraph from join_path_inference
+
+    Returns:
+        Modified SQL or None (abort — no injection possible)
+    """
+    primary_short = primary_table.split(".")[-1].lower()
+
+    # CASE 1: Direct — primary table has ALL route columns
+    all_direct = all(
+        schema_metadata.column_exists_in_table(primary_short, col)
+        for col in column_names
+    )
+    if all_direct:
+        primary_ref = _find_table_ref_in_sql(primary_short, table_aliases)
+        qualified_conditions = []
+        for cond, col in zip(conditions, column_names):
+            qualified_conditions.append(cond.replace(col, f"{primary_ref}.{col}", 1))
+        qualified_conditions = _deduplicate_filter_conditions(
+            sql, qualified_conditions, table_aliases
+        )
+        if not qualified_conditions:
+            return sql
+        filter_expr = " AND ".join(qualified_conditions)
+        logger.info(f"[FILTER_INJECT] Direct injection (base table has columns): {filter_expr}")
+        return _inject_filter_expr_into_sql(sql, filter_expr)
+
+    # CASE 2: Relational — find a target table that has ALL route columns
+    target_sg_key = None
+    target_short = None
+    for tbl_key in schema_metadata.tables:
+        tbl_short = tbl_key.split(".")[-1].lower()
+        if all(schema_metadata.column_exists_in_table(tbl_short, col) for col in column_names):
+            target_sg_key = tbl_key
+            target_short = tbl_short
+            break
+
+    if not target_sg_key:
+        logger.warning("[FILTER_INJECT] ABORT: No table found containing all route columns")
+        return None
+
+    # Check if target table is already in the SQL
+    target_already_in_sql = False
+    for alias, full_name in table_aliases.items():
+        full_short = full_name.split(".")[-1].lower()
+        if full_short == target_short:
+            target_already_in_sql = True
+            break
+
+    if target_already_in_sql:
+        # Target already joined — just add qualified WHERE
+        target_ref = _find_table_ref_in_sql(target_short, table_aliases)
+        qualified_conditions = []
+        for cond, col in zip(conditions, column_names):
+            qualified_conditions.append(cond.replace(col, f"{target_ref}.{col}", 1))
+        qualified_conditions = _deduplicate_filter_conditions(
+            sql, qualified_conditions, table_aliases
+        )
+        if not qualified_conditions:
+            return sql
+        filter_expr = " AND ".join(qualified_conditions)
+        logger.info(f"[FILTER_INJECT] Target already joined (ref={target_ref}): {filter_expr}")
+        return _inject_filter_expr_into_sql(sql, filter_expr)
+
+    # Target NOT in SQL — use DJPI to find join path
+    source_sg_key = _resolve_to_schema_graph_key(primary_short, schema_graph.tables)
+    dest_sg_key = _resolve_to_schema_graph_key(target_short, schema_graph.tables)
+
+    if not source_sg_key or not dest_sg_key:
+        logger.warning(
+            f"[FILTER_INJECT] ABORT: Could not resolve SchemaGraph keys: "
+            f"{primary_short} -> {source_sg_key}, {target_short} -> {dest_sg_key}"
+        )
+        return None
+
+    join_path = schema_graph.find_join_path(source_sg_key, dest_sg_key)
+
+    if not join_path:
+        logger.warning(
+            f"[FILTER_INJECT] ABORT: No DJPI path found: {primary_short} -> {target_short}"
+        )
+        return None
+
+    logger.info(
+        f"[FILTER_INJECT] DJPI path found ({len(join_path)} hop(s)): "
+        + " -> ".join([join_path[0][0]] + [step[2] for step in join_path])
+    )
+
+    # Build JOIN clauses, skipping tables already in SQL
+    join_clauses = []
+    for from_tbl, from_col, to_tbl, to_col in join_path:
+        to_short = to_tbl.split(".")[-1].lower()
+        # Check if this intermediate/target table is already in SQL
+        already_present = False
+        for alias, full_name in table_aliases.items():
+            if full_name.split(".")[-1].lower() == to_short:
+                already_present = True
+                break
+
+        if not already_present:
+            # Resolve the from-table reference (may be aliased in SQL or a prior hop)
+            from_short = from_tbl.split(".")[-1].lower()
+            from_ref = _find_table_ref_in_sql(from_short, table_aliases)
+            # For intermediate tables added by us, use the schema-prefixed name
+            join_clauses.append(
+                f"JOIN {to_tbl} ON {from_ref}.{from_col} = {to_tbl}.{to_col}"
+            )
+            # Add the new table to aliases so subsequent hops can reference it
+            table_aliases[to_short] = to_tbl.lower()
+
+    # Build qualified filter — target table uses its schema-prefixed name
+    # (since we added it via JOIN with its full name)
+    target_ref = _find_table_ref_in_sql(target_short, table_aliases)
+    qualified_conditions = []
+    for cond, col in zip(conditions, column_names):
+        qualified_conditions.append(cond.replace(col, f"{target_ref}.{col}", 1))
+    qualified_conditions = _deduplicate_filter_conditions(
+        sql, qualified_conditions, table_aliases
+    )
+    if not qualified_conditions:
+        return sql
+    filter_expr = " AND ".join(qualified_conditions)
+
+    if join_clauses:
+        logger.info(f"[FILTER_INJECT] Relational injection complete: {len(join_clauses)} JOIN(s)")
+        injected_sql = _inject_joins_and_filters(sql, join_clauses, filter_expr)
+
+        # Qualify unqualified SELECT columns to prevent ambiguity after JOIN
+        primary_ref = _find_table_ref_in_sql(primary_short, table_aliases)
+        base_columns = schema_metadata.get_table_columns(primary_short)
+        if base_columns:
+            injected_sql = _qualify_select_columns(injected_sql, primary_ref, base_columns)
+            logger.info(
+                f"[FILTER_INJECT] SELECT columns qualified with base ref '{primary_ref}'"
+            )
+        return injected_sql
+    else:
+        # All intermediate tables were already present — just add filter
+        return _inject_filter_expr_into_sql(sql, filter_expr)
+
+
+def inject_structured_route_filters(
+    sql: str,
+    route_filters: Dict[str, str],
+    schema_metadata=None,
+    schema_graph=None,
+) -> str:
+    """
+    Inject structured route filter constraints into SQL.
+
+    v6.12.1: Relationally-aware. If the base table lacks route columns,
+    uses DJPI SchemaGraph.find_join_path() to discover join chains and
+    injects the necessary JOINs before adding WHERE conditions.
+
+    Uses sqlparse for structural WHERE clause detection.
+    Inserts AND/WHERE constraints at SQL clause boundaries.
+
+    Args:
+        sql: Generated SQL query
+        route_filters: Dict of column_name -> IATA code
+                       e.g. {"departure_airport": "JFK", "arrival_airport": "ATL"}
+        schema_metadata: SchemaMetadata from relational_corrector (optional)
+        schema_graph: SchemaGraph from join_path_inference (optional)
+
+    Returns:
+        SQL with structured WHERE constraints injected.
+
+    Input validation:
+        - Column names must be valid SQL identifiers (lowercase, alphanumeric + underscore)
+        - Values must be 3-letter uppercase IATA codes
+        - Invalid entries are silently skipped with warning
+
+    Backward compatibility:
+        If schema_metadata or schema_graph are None, falls back to legacy
+        direct injection (unqualified columns, no JOIN awareness).
+    """
+    if not route_filters or not sql or not sql.strip():
+        return sql
+
+    # Build validated filter conditions
+    conditions = []
+    column_names = []
+    for col, val in sorted(route_filters.items()):
+        # Column names: valid SQL identifiers only
+        if not re.match(r'^[a-z_][a-z0-9_]*$', col):
+            logger.warning(f"[FILTER_INJECT] Rejected column name: {col}")
+            continue
+        # Values: strict 3-letter IATA codes only
+        if not re.match(r'^[A-Z]{3}$', val):
+            logger.warning(f"[FILTER_INJECT] Rejected filter value: {val}")
+            continue
+        conditions.append(f"{col} = '{val}'")
+        column_names.append(col)
+
+    if not conditions:
+        return sql
+
+    # Relationally-aware injection (v6.12.1)
+    if schema_metadata is not None and schema_graph is not None:
+        try:
+            from relational_corrector import SQLParser
+            table_aliases, primary_table = SQLParser.extract_tables_with_aliases(sql)
+
+            if primary_table:
+                result = _inject_relationally_aware(
+                    sql, conditions, column_names,
+                    table_aliases, primary_table,
+                    schema_metadata, schema_graph,
+                )
+                if result is not None:
+                    return result
+                # result is None means ABORT — return SQL unmodified
+                logger.info("[FILTER_INJECT] Relational injection aborted — returning SQL unmodified")
+                return sql
+        except Exception as e:
+            logger.error(f"[FILTER_INJECT] Relational injection failed: {e} — falling back to legacy")
+
+    # Legacy direct injection (no schema info or fallback)
+    conditions = _deduplicate_filter_conditions(sql, conditions, {})
+    if not conditions:
+        return sql
+    filter_expr = " AND ".join(conditions)
+    logger.info(f"[FILTER_INJECT] Injected structured route filters (legacy): {filter_expr}")
+    return _inject_filter_expr_into_sql(sql, filter_expr)
 
 
 # =============================================================================

@@ -695,9 +695,15 @@ class IntentState:
         v6.2: Added comparison guardrail check.
         v6.7: Added ambiguous entity check (BUG 4 fix).
         v6.10: Added row-select query support (MVP).
+        v6.11: Row-select must also check entity disambiguation (consistency fix).
         """
         # v6.10: Row-select queries can proceed even without traditional metric
         if self.is_row_select_query():
+            # v6.11: Row-select queries are NOT exempt from entity disambiguation.
+            # "list customers" must still clarify which table "customer" maps to.
+            if self.is_ambiguous_entity():
+                logger.info("[INTENT] Row-select blocked: ambiguous entity requires disambiguation")
+                return False
             self.row_select = True  # Mark for downstream processing
             logger.info("[INTENT] Row-select query -> can_proceed=True")
             return True

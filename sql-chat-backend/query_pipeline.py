@@ -20,6 +20,17 @@ from intent_accumulator import (
     match_ambiguity_response,
     format_ambiguity_clarification,
 )
+from context_resolver import apply_semantic_context_binding
+from sgrd import (
+    disclose_greeting,
+    disclose_visualization,
+    disclose_for_intent_proceed,
+    disclose_for_clarification,
+    disclose_for_pending_ambiguity,
+    disclose_for_cost_guard,
+    disclose_execution_success,
+    disclose_execution_failure,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +52,8 @@ class PipelineResult:
     clarification_needed: bool = False
     chart_suggestion: Optional[Dict] = None
     error: Optional[str] = None
+    # SGRD: Schema-Grounded Reasoning Disclosure (read-only projection)
+    reasoning_disclosure: Optional[str] = None
 
 
 # =============================================================================
@@ -202,7 +215,8 @@ class QueryPipeline:
                             ),
                             session_id=session_id,
                             execution_time=self._elapsed(start),
-                            clarification_needed=True
+                            clarification_needed=True,
+                            reasoning_disclosure=disclose_for_pending_ambiguity(pending),
                         )
 
             # Extract intent (one-shot, no decisions)
@@ -229,7 +243,8 @@ class QueryPipeline:
                             response=format_clarification(decision),
                             session_id=session_id,
                             execution_time=self._elapsed(start),
-                            clarification_needed=True
+                            clarification_needed=True,
+                            reasoning_disclosure=disclose_for_clarification(decision),
                         )
 
                     # PROCEED - get query for NL-SQL
@@ -242,6 +257,21 @@ class QueryPipeline:
             else:
                 # Extraction failed - proceed with original query anyway
                 query_for_nlsql = query
+
+            # =================================================================
+            # SEMANTIC CONTEXT BINDING (v6.12 - Structured Constraint Injection)
+            # =================================================================
+            context_disclosure = None
+            route_filters = None
+            session_context = session.get("session_context")
+            if session_context is not None:
+                query_for_nlsql, context_disclosure, route_filters = apply_semantic_context_binding(
+                    query=query_for_nlsql,
+                    entity_type=getattr(accumulated, 'entity_type', None) if accumulated else None,
+                    session_context=session_context,
+                )
+                if context_disclosure:
+                    logger.info("[PIPELINE] Semantic context binding applied")
 
             # =================================================================
             # OBSERVATION (non-blocking)
@@ -260,7 +290,8 @@ class QueryPipeline:
                 user_query=query_for_nlsql,
                 row_limit=row_limit,
                 timeout=45.0,
-                intent_state=accumulated  # v6.1.1: Pass intent state for FK preferences
+                intent_state=accumulated,  # v6.1.1: Pass intent state for FK preferences
+                route_filters=route_filters,  # v6.12: Structured route constraints
             )
 
             # =================================================================
@@ -323,7 +354,8 @@ class QueryPipeline:
                     session_id=session_id,
                     execution_time=self._elapsed(start),
                     sql_query=result.get("sql"),  # Include SQL for debugging
-                    clarification_needed=True
+                    clarification_needed=True,
+                    reasoning_disclosure=disclose_for_pending_ambiguity(pending),
                 )
 
             # =================================================================
@@ -331,7 +363,8 @@ class QueryPipeline:
             # =================================================================
 
             return self._handle_execution_result(
-                result, accumulated, session_id, start
+                result, accumulated, session_id, start,
+                context_disclosure=context_disclosure
             )
 
         except Exception as e:
@@ -341,7 +374,8 @@ class QueryPipeline:
                 response="An error occurred. Please try again.",
                 session_id=session_id,
                 execution_time=self._elapsed(start),
-                error=str(e)
+                error=str(e),
+                reasoning_disclosure=disclose_execution_failure(),
             )
 
     # =========================================================================
@@ -392,7 +426,8 @@ class QueryPipeline:
                 sql_query=last.get("sql"),
                 data=data,
                 query_results=data,
-                chart_suggestion=chart
+                chart_suggestion=chart,
+                reasoning_disclosure=disclose_visualization(has_data=True),
             )
 
         return PipelineResult(
@@ -400,7 +435,8 @@ class QueryPipeline:
             response="No data to visualize. Run a query first.",
             session_id=session_id,
             execution_time=self._elapsed(start),
-            error="No data"
+            error="No data",
+            reasoning_disclosure=disclose_visualization(has_data=False),
         )
 
     def _greeting_response(self, session_id: str, start: datetime) -> PipelineResult:
@@ -415,7 +451,8 @@ class QueryPipeline:
 
 What would you like to explore?""",
             session_id=session_id,
-            execution_time=self._elapsed(start)
+            execution_time=self._elapsed(start),
+            reasoning_disclosure=disclose_greeting(),
         )
 
     # =========================================================================
@@ -427,7 +464,8 @@ What would you like to explore?""",
         result: Dict[str, Any],
         accumulated: Any,
         session_id: str,
-        start: datetime
+        start: datetime,
+        context_disclosure: Optional[str] = None
     ) -> PipelineResult:
         """
         Handle the result from SQL execution.
@@ -456,13 +494,17 @@ What would you like to explore?""",
                 session_id=session_id,
                 execution_time=self._elapsed(start),
                 sql_query=result.get("sql"),
-                clarification_needed=True
+                clarification_needed=True,
+                reasoning_disclosure="Multiple interpretations detected. Clarification required.",
             )
 
         if result["success"]:
             data = result["data"]
             sql = result["sql"]
             row_count = result["row_count"]
+
+            # SGRD: Capture intent disclosure BEFORE clearing accumulated state
+            intent_disclosure = disclose_for_intent_proceed(accumulated)
 
             # Cache for viz
             if self.set_last_sql_result:
@@ -482,6 +524,12 @@ What would you like to explore?""",
             if row_count > 0:
                 response += "\n\n*Tip: Ask me to 'visualize this' for charts.*"
 
+            # SGRD: Combine intent acknowledgement with execution confirmation
+            exec_disclosure = disclose_execution_success(row_count)
+            disclosure = f"{intent_disclosure} {exec_disclosure}"
+            if context_disclosure:
+                disclosure = f"{context_disclosure} {disclosure}"
+
             return PipelineResult(
                 success=True,
                 response=response,
@@ -489,18 +537,27 @@ What would you like to explore?""",
                 execution_time=self._elapsed(start),
                 sql_query=sql,
                 data=data,
-                query_results=data
+                query_results=data,
+                reasoning_disclosure=disclosure,
             )
 
         else:
             error_msg = result.get("error") or "Unknown error"
+
+            # SGRD: Distinguish cost guard refusal from general failure
+            if result.get("error_type") == "cost_guard":
+                disclosure = disclose_for_cost_guard(result)
+            else:
+                disclosure = disclose_execution_failure()
+
             return PipelineResult(
                 success=False,
                 response=f"**Query failed:** {error_msg}",
                 session_id=session_id,
                 execution_time=self._elapsed(start),
                 sql_query=result.get("sql"),
-                error=error_msg
+                error=error_msg,
+                reasoning_disclosure=disclosure,
             )
 
     def _is_new_query_pattern(self, query: str) -> bool:

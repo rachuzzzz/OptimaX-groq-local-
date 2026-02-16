@@ -81,7 +81,7 @@ class DatabaseManager:
             # Load tables from the active schema
             try:
                 tables = inspector.get_table_names(schema=self.active_schema)
-            except:
+            except Exception:
                 # Fallback: try without schema (for databases that don't use schemas)
                 tables = inspector.get_table_names()
                 self.active_schema = None  # No schema prefix needed

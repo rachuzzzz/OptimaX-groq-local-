@@ -787,6 +787,116 @@ class ResultContextBinder:
 
 
 # =============================================================================
+# SEMANTIC CONTEXT BINDING (v6.12 - Route Context Injection)
+# =============================================================================
+# Deterministic route context binding for multi-turn queries.
+# Uses structural IATA pattern detection + semantic state comparison.
+# No keyword matching. No LLM calls.
+# =============================================================================
+
+ROUTE_COMPATIBLE_ENTITIES: Set[str] = {
+    "flight", "flights", "route", "routes", "booking", "bookings",
+    "reservation", "reservations", "leg", "legs", "segment", "segments",
+    "ticket", "tickets",
+}
+
+_module_route_detector = RouteDetector()
+
+
+def apply_semantic_context_binding(
+    query: str,
+    entity_type: Optional[str],
+    session_context: Optional['SessionContext'],
+) -> Tuple[str, Optional[str], Optional[Dict[str, str]]]:
+    """
+    Deterministic semantic context binding with lifecycle management.
+
+    Returns STRUCTURED ROUTE FILTERS for post-SQL-generation injection.
+    The query string is NEVER modified.
+
+    LIFECYCLE RULE (v6.1.1):
+    Route context is ONLY retained when the current query demonstrates
+    continued route intent. This prevents stale route filters from leaking
+    into unrelated queries.
+
+    A query demonstrates route intent when it:
+    - Contains a NEW explicit route (e.g., "JFK to ATL") → CAPTURE, no bind
+    - Contains a route REFERENCE (e.g., "this route", "same route") → BIND
+
+    A query WITHOUT route intent causes the stored route to be CLEARED.
+    This is deterministic: no keyword heuristics, no LLM calls.
+
+    BINDING CONDITIONS (ALL must be true):
+    1. Query contains a route reference ("this route", "that route", etc.)
+    2. session_context exists and has a stored route
+    3. entity_type is in ROUTE_COMPATIBLE_ENTITIES
+
+    Returns:
+        (query, disclosure, route_filters)
+        — query is NEVER modified
+        — disclosure is None if no binding
+        — route_filters is {"departure_airport": "JFK", "arrival_airport": "ATL"} or None
+    """
+    from sgrd import disclose_context_resolution
+
+    # Step 1: CAPTURE — detect explicit route in current query
+    detected = _module_route_detector.detect_route(query)
+    if detected:
+        departure, arrival = detected
+        if session_context is not None:
+            session_context.bind_route(departure, arrival, source_query=query)
+        logger.info(f"[CONTEXT_BINDING] Route captured: {departure} -> {arrival}")
+        return (query, None, None)  # Query already has route, no binding needed
+
+    # Step 2: LIFECYCLE — check if query references prior route context
+    # If no route reference, the stored route is stale → clear it.
+    # This prevents route filters from leaking into unrelated queries.
+    # e.g., "count bookings" after "flights from JFK to ATL" must NOT inherit
+    # the JFK→ATL route filters.
+    has_route_ref = _module_route_detector.has_route_reference(query)
+
+    if not has_route_ref:
+        if session_context is not None and session_context.has_route():
+            logger.info(
+                "[CONTEXT_BINDING] No route reference in query — "
+                "clearing stale route context"
+            )
+            session_context.clear_route()
+        return (query, None, None)
+
+    # Step 3: GUARD — session must have a stored route to resolve reference
+    if session_context is None or not session_context.has_route():
+        logger.debug(
+            "[CONTEXT_BINDING] Route reference detected but no stored route"
+        )
+        return (query, None, None)
+
+    # Step 4: GUARD — entity must be route-compatible
+    if entity_type is None or entity_type.lower() not in ROUTE_COMPATIBLE_ENTITIES:
+        logger.debug(
+            f"[CONTEXT_BINDING] Skipped: entity_type '{entity_type}' "
+            f"not in ROUTE_COMPATIBLE_ENTITIES"
+        )
+        return (query, None, None)
+
+    # Step 5: BIND — build structured route filters (NO query string modification)
+    route = session_context.get_route()
+    route_filters = {
+        "departure_airport": route.departure,
+        "arrival_airport": route.arrival,
+    }
+    disclosure = disclose_context_resolution(
+        departure=route.departure, arrival=route.arrival
+    )
+    logger.info(
+        f"[CONTEXT_BIND] Injected structured route filters: "
+        f"departure_airport={route.departure} "
+        f"arrival_airport={route.arrival}"
+    )
+    return (query, disclosure, route_filters)
+
+
+# =============================================================================
 # CONVENIENCE FUNCTIONS
 # =============================================================================
 

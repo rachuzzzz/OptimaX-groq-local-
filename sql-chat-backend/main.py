@@ -116,9 +116,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
-import os
 from dotenv import load_dotenv
-import logging
 from datetime import datetime
 import uuid
 import asyncio
@@ -134,6 +132,114 @@ from sqlalchemy import create_engine
 
 # Disable embeddings (we use NL-SQL, not RAG)
 Settings.embed_model = None
+
+# =============================================================================
+# LLM PROVIDER GUARDRAIL: Block OpenAI drift at import time
+# =============================================================================
+# ARCHITECTURE NOTE:
+#   The Groq LLM adapter's inheritance chain is:
+#     Groq → OpenAILike → OpenAI (base class) → openai SDK (HTTP transport)
+#
+#   Therefore these packages are REQUIRED transitive dependencies:
+#     - llama-index-llms-openai       (base class for LLM interface)
+#     - llama-index-llms-openai-like  (Groq inherits from this)
+#     - openai                        (HTTP client / transport layer)
+#
+#   These packages cause ACTUAL LLM drift (register OpenAI as default):
+#     - llama-index-agent-openai
+#     - llama-index-embeddings-openai
+#     - llama-index-multi-modal-llms-openai
+#     - llama-index-program-openai
+#     - llama-index-question-gen-openai
+#     - llama-index (meta-package that pulls all of the above)
+#
+# This guardrail blocks the drift packages while allowing the required ones.
+# =============================================================================
+
+# Packages that cause actual LLM drift (register OpenAI as default provider)
+_DRIFT_PACKAGE_PATTERNS = [
+    "llama-index-agent-openai",
+    "llama-index-embeddings-openai",
+    "llama-index-multi-modal-llms-openai",
+    "llama-index-program-openai",
+    "llama-index-question-gen-openai",
+]
+
+def _enforce_single_llm_provider():
+    """
+    Verify no OpenAI drift packages are installed. Fail fast if found.
+
+    ALLOWED (required by Groq adapter's inheritance chain):
+      - llama-index-llms-openai       (base LLM class)
+      - llama-index-llms-openai-like  (Groq inherits from this)
+      - openai                        (HTTP transport)
+
+    BLOCKED (cause default LLM registration to OpenAI):
+      - llama-index-agent-openai
+      - llama-index-embeddings-openai
+      - llama-index-multi-modal-llms-openai
+      - llama-index-program-openai
+      - llama-index-question-gen-openai
+
+    Uses importlib.metadata for reliable detection.
+    """
+    import importlib.metadata
+
+    _drift_found = []
+
+    for dist in importlib.metadata.distributions():
+        pkg_name = dist.metadata["Name"].lower()
+        for pattern in _DRIFT_PACKAGE_PATTERNS:
+            if pkg_name == pattern:
+                _drift_found.append(f"{dist.metadata['Name']}=={dist.metadata['Version']}")
+
+    # Also check for the meta-package (pulls in all drift packages)
+    try:
+        meta_ver = importlib.metadata.version("llama-index")
+        _drift_found.append(f"llama-index=={meta_ver}")
+    except importlib.metadata.PackageNotFoundError:
+        pass  # Good — meta-package not installed
+
+    if _drift_found:
+        _uninstall_cmd = " ".join(p.split("==")[0] for p in _drift_found)
+        _msg = (
+            f"\n{'='*70}\n"
+            f"FATAL: LLM PROVIDER DRIFT DETECTED\n"
+            f"{'='*70}\n"
+            f"\n"
+            f"  Drift packages found:\n"
+        )
+        for p in _drift_found:
+            _msg += f"    - {p}\n"
+        _msg += (
+            f"\n"
+            f"  These packages register OpenAI as the default LLM provider,\n"
+            f"  causing silent fallback and APIConnectionError.\n"
+            f"\n"
+            f"  OptimaX uses Groq as its SOLE LLM provider.\n"
+            f"\n"
+            f"  FIX:\n"
+            f"    pip uninstall -y {_uninstall_cmd}\n"
+            f"    pip install -r requirements.txt\n"
+            f"\n"
+            f"{'='*70}\n"
+        )
+        print(_msg, flush=True)
+        logging.getLogger(__name__).critical(
+            f"LLM provider drift: {_drift_found}. "
+            f"Startup blocked. Run: pip uninstall -y {_uninstall_cmd}"
+        )
+        raise RuntimeError(
+            f"LLM provider drift: {_drift_found} installed. "
+            f"OptimaX requires Groq-only. See log above for fix."
+        )
+
+    print("[PROVIDER GUARD] Groq-only architecture verified — no drift packages detected", flush=True)
+
+_enforce_single_llm_provider()
+# =============================================================================
+# END LLM PROVIDER GUARDRAIL
+# =============================================================================
 
 from tools import (
     initialize_tools,
@@ -153,6 +259,9 @@ from join_path_inference import (
 
 # === Query Pipeline ===
 from query_pipeline import QueryPipeline, PipelineResult
+
+# Logger for this module - defined here BEFORE optional imports that use it in except blocks
+logger = logging.getLogger(__name__)
 
 # === Optional Modules (graceful degradation if missing) ===
 try:
@@ -258,9 +367,6 @@ except ImportError:
 
 load_dotenv()
 
-# Logger for this module (uses centralized config from top of file)
-logger = logging.getLogger(__name__)
-
 
 # Lifespan context manager for startup/shutdown
 @asynccontextmanager
@@ -304,7 +410,7 @@ async def lifespan(app: FastAPI):
         if not DATABASE_URL:
             raise ValueError("DATABASE_URL not found in environment variables!")
 
-        # === LLM Initialization ===
+        # === LLM Initialization (Single Provider: Groq) ===
         llm = Groq(
             model=GROQ_MODEL,
             api_key=GROQ_API_KEY,
@@ -312,7 +418,14 @@ async def lifespan(app: FastAPI):
             max_output_tokens=1024,  # v5.0: Increased for complex SQL queries
         )
 
-        # Set LLM globally in LlamaIndex Settings (ensures no OpenAI fallback)
+        # PROVIDER ASSERTION: Verify the LLM instance is actually Groq
+        _llm_class = type(llm).__module__ + "." + type(llm).__qualname__
+        assert "groq" in _llm_class.lower(), (
+            f"LLM provider assertion failed: expected Groq, got {_llm_class}"
+        )
+        logger.info(f"[PROVIDER] LLM class verified: {_llm_class}")
+
+        # Set LLM globally in LlamaIndex Settings (ensures no internal fallback)
         Settings.llm = llm
 
         logger.info(f"[OK] Groq LLM initialized: {GROQ_MODEL}")
@@ -636,13 +749,15 @@ custom_prompt_config = {
 def execute_nl_sql_query(
     user_query: str,
     row_limit: int = 50,
-    intent_state: Optional[Any] = None
+    intent_state: Optional[Any] = None,
+    route_filters: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Execute NL-SQL query with hard-gated error handling.
 
     Returns structured result: success/sql/data/columns/error.
     Intent_state provides resolved FK preferences from prior clarifications.
+    Route_filters provides structured route constraints for post-generation injection.
     """
     global nl_sql_engine, db_manager, schema_graph
 
@@ -821,6 +936,27 @@ def execute_nl_sql_query(
                 logger.info(f"  - Added JOIN: {fix['join_condition']}")
             sql_query = correction_result.corrected_sql
 
+    # =====================================================================
+    # v6.12: STRUCTURED ROUTE FILTER INJECTION
+    # =====================================================================
+    # Inject structured route constraints into SQL AFTER RCL correction
+    # and BEFORE column validation. Operates on SQL structure, not query
+    # string. Uses sqlparse for structural WHERE detection.
+    # =====================================================================
+    if route_filters:
+        from sql_validator import inject_structured_route_filters
+        sql_query = inject_structured_route_filters(
+            sql_query,
+            route_filters,
+            schema_metadata=relational_corrector.schema if relational_corrector else None,
+            schema_graph=schema_graph,
+        )
+        logger.info(
+            f"[STRICT] Structured route filters injected: "
+            f"departure_airport={route_filters.get('departure_airport')} "
+            f"arrival_airport={route_filters.get('arrival_airport')}"
+        )
+
     # Column existence validation
     if SQL_VALIDATION_AVAILABLE and db_manager and db_manager.schema:
         column_result = validate_column_existence(sql_query, db_manager.schema)
@@ -976,18 +1112,20 @@ async def execute_nl_sql_query_async(
     user_query: str,
     row_limit: int = 50,
     timeout: float = 45.0,
-    intent_state: Optional[Any] = None
+    intent_state: Optional[Any] = None,
+    route_filters: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Async wrapper for execute_nl_sql_query with timeout.
 
     v6.1.1: Added intent_state parameter for resolved FK preferences.
+    v6.12: Added route_filters for structured constraint injection.
 
     Returns structured result or timeout error.
     """
     try:
         result = await asyncio.wait_for(
-            asyncio.to_thread(execute_nl_sql_query, user_query, row_limit, intent_state),
+            asyncio.to_thread(execute_nl_sql_query, user_query, row_limit, intent_state, route_filters),
             timeout=timeout
         )
         return result
@@ -1214,9 +1352,8 @@ async def verify_llamaindex():
         "errors": [],
     }
 
-    # Required imports
+    # Required imports (Groq-only — no meta-package)
     required_imports = [
-        ("llama_index", "Meta-package"),
         ("llama_index.core", "Core library"),
         ("llama_index.core.query_engine", "Query engine module"),
         ("llama_index.llms.groq", "Groq LLM integration"),
@@ -1282,9 +1419,9 @@ async def verify_llamaindex():
             result["imports"][key] = {"status": "fail", "error": str(e)}
             result["errors"].append(f"Cannot import {module_path}: {e}")
 
-    # Check versions
-    packages = ["llama-index", "llama-index-core", "llama-index-llms-groq"]
-    expected_prefixes = {"llama-index": "0.12", "llama-index-core": "0.12", "llama-index-llms-groq": "0.3"}
+    # Check versions (Groq-only — no meta-package)
+    packages = ["llama-index-core", "llama-index-llms-groq"]
+    expected_prefixes = {"llama-index-core": "0.14", "llama-index-llms-groq": "0.4"}
 
     for pkg in packages:
         try:
@@ -1777,7 +1914,6 @@ async def connect_to_database(request: DatabaseConnectionRequest):
             tools=tools,
             llm=llm,
             verbose=True,
-            context=final_prompt,
         )
 
         # Clear all existing sessions
@@ -1949,7 +2085,6 @@ async def apply_system_prompt():
             tools=tools,
             llm=llm,
             verbose=True,
-            context=final_prompt,
         )
 
         # Clear all sessions
@@ -2015,6 +2150,7 @@ async def chat(message: ChatMessage):
     )
 
     # Convert PipelineResult to ChatResponse
+    # SGRD: agent_reasoning is populated from reasoning_disclosure (read-only projection)
     return ChatResponse(
         response=result.response,
         session_id=result.session_id,
@@ -2024,7 +2160,7 @@ async def chat(message: ChatMessage):
         execution_time=result.execution_time,
         tasks=None,
         clarification_needed=result.clarification_needed,
-        agent_reasoning=None,
+        agent_reasoning=result.reasoning_disclosure,
         chart_suggestion=result.chart_suggestion,
         error=result.error,
     )

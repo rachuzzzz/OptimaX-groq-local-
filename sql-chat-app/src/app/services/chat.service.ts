@@ -1,4 +1,4 @@
-import { Injectable } from '@angular/core';
+import { Injectable, isDevMode } from '@angular/core';
 import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { Observable } from 'rxjs';
 
@@ -72,7 +72,9 @@ export class ChatService {
   private agenticMode = true;
 
   private get baseUrl(): string {
-    return 'http://localhost:8000';  // v4.0 simplified backend
+    // Dev mode: direct to backend on port 8000
+    // Production (Docker): use nginx /api/ proxy
+    return isDevMode() ? 'http://localhost:8000' : '/api';
   }
 
   constructor(private http: HttpClient) {}

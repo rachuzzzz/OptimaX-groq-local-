@@ -49,7 +49,6 @@ class CheckResult:
 # Required LlamaIndex imports for NL-SQL
 REQUIRED_IMPORTS = [
     # (import_path, description, is_critical)
-    ("llama_index", "Meta-package", True),
     ("llama_index.core", "Core library", True),
     ("llama_index.core.query_engine", "Query engine module", True),
     ("llama_index.core.query_engine.sql_query_engine", "SQL query engine", True),
@@ -66,11 +65,10 @@ REQUIRED_CLASSES = [
     ("llama_index.llms.groq", "Groq"),
 ]
 
-# Expected package versions (for consistency check)
+# Expected package versions (Groq-only — no meta-package)
 EXPECTED_VERSIONS = {
-    "llama-index": "0.12",  # Prefix match
-    "llama-index-core": "0.12",
-    "llama-index-llms-groq": "0.3",
+    "llama-index-core": "0.14",
+    "llama-index-llms-groq": "0.4",
 }
 
 
@@ -271,28 +269,24 @@ def check_versions(verbose: bool = False) -> CheckResult:
         if version:
             details.append(f"{package_name}=={version}")
 
-    # Check for version mismatches between core packages
-    print("\n  Checking version alignment:")
+    # Check for unwanted OpenAI provider
+    print("\n  Checking LLM provider isolation:")
     core_version = versions.get("llama-index-core")
-    meta_version = versions.get("llama-index")
-
-    if core_version and meta_version:
-        # Extract major.minor for comparison
-        core_mm = ".".join(core_version.split(".")[:2])
-        meta_mm = ".".join(meta_version.split(".")[:2])
-
-        if core_mm != meta_mm:
+    openai_detected = False
+    for name, version in all_packages:
+        if "openai" in name.lower():
+            openai_detected = True
             warnings.append(
-                f"Version mismatch: llama-index={meta_version}, llama-index-core={core_version}"
+                f"{name}=={version} is installed but should NOT be (causes OpenAI fallback). "
+                f"Remove with: pip uninstall {name}"
             )
             print_status(
                 Status.WARN,
-                f"llama-index ({meta_version}) vs llama-index-core ({core_version})",
+                f"{name}=={version} detected — causes OpenAI fallback!",
                 indent=1
             )
-            print("      These should have matching major.minor versions")
-        else:
-            print_status(Status.PASS, "Core and meta-package versions aligned", indent=1)
+    if not openai_detected:
+        print_status(Status.PASS, "No OpenAI provider packages detected (Groq-only)", indent=1)
 
     # List all LlamaIndex packages found
     if verbose and all_packages:
@@ -308,7 +302,7 @@ def check_versions(verbose: bool = False) -> CheckResult:
             status=Status.FAIL,
             message=f"{len(errors)} package(s) missing",
             details=details,
-            fix="pip install llama-index==0.12.0 llama-index-core==0.12.0 llama-index-llms-groq==0.3.0"
+            fix="pip install llama-index-core==0.14.5 llama-index-llms-groq==0.4.1"
         )
     elif warnings:
         return CheckResult(

@@ -27,7 +27,8 @@ from typing import Optional, List, Tuple, Dict
 EXPECTED_VENV_NAME = ".venv"  # Expected virtual environment directory name
 REQUIRED_PACKAGES = [
     # (module_name, package_name, verification_attribute)
-    ("llama_index", "llama-index", "__version__"),
+    # NOTE: We do NOT require the llama-index meta-package (it pulls in OpenAI).
+    # Only llama-index-core and llama-index-llms-groq are needed.
     ("llama_index.core", "llama-index-core", None),
     ("llama_index.llms.groq", "llama-index-llms-groq", None),
     ("llama_index.core.query_engine", "llama-index-core", "NLSQLTableQueryEngine"),
@@ -189,7 +190,7 @@ def validate_llama_index_nlsql() -> List[str]:
             f"LLAMA_INDEX NL-SQL COMPONENTS NOT AVAILABLE!\n"
             f"  Import error: {e}\n"
             f"  This is a CRITICAL ERROR - the application cannot function.\n"
-            f"  Solution: pip install llama-index llama-index-core llama-index-llms-groq"
+            f"  Solution: pip install llama-index-core llama-index-llms-groq"
         )
 
     return errors
@@ -359,11 +360,10 @@ def check_llama_index_versions() -> Tuple[List[str], Dict[str, str]]:
     try:
         import importlib.metadata
 
-        # Expected version prefixes
+        # Expected version prefixes (Groq-only — no meta-package)
         expected = {
-            "llama-index": "0.12",
-            "llama-index-core": "0.12",
-            "llama-index-llms-groq": "0.3",
+            "llama-index-core": "0.14",
+            "llama-index-llms-groq": "0.4",
         }
 
         for pkg, expected_prefix in expected.items():
@@ -378,16 +378,27 @@ def check_llama_index_versions() -> Tuple[List[str], Dict[str, str]]:
                 versions[pkg] = "NOT INSTALLED"
                 warnings.append(f"{pkg}: NOT INSTALLED")
 
-        # Check version alignment
-        core_ver = versions.get("llama-index-core", "")
-        meta_ver = versions.get("llama-index", "")
-        if core_ver and meta_ver and core_ver != "NOT INSTALLED" and meta_ver != "NOT INSTALLED":
-            core_mm = ".".join(core_ver.split(".")[:2])
-            meta_mm = ".".join(meta_ver.split(".")[:2])
-            if core_mm != meta_mm:
+        # Check for drift packages (register OpenAI as default LLM)
+        # NOTE: llama-index-llms-openai and llama-index-llms-openai-like are
+        # REQUIRED transitive deps of llama-index-llms-groq (Groq inherits
+        # from OpenAILike). Only the EXTRA adapters below cause drift.
+        drift_packages = [
+            "llama-index-agent-openai",
+            "llama-index-embeddings-openai",
+            "llama-index-multi-modal-llms-openai",
+            "llama-index-program-openai",
+            "llama-index-question-gen-openai",
+        ]
+        for drift_pkg in drift_packages:
+            try:
+                drift_ver = importlib.metadata.version(drift_pkg)
+                versions[drift_pkg] = drift_ver
                 warnings.append(
-                    f"Version mismatch: llama-index={meta_ver} vs llama-index-core={core_ver}"
+                    f"{drift_pkg}={drift_ver} causes LLM drift. "
+                    f"Remove with: pip uninstall {drift_pkg}"
                 )
+            except importlib.metadata.PackageNotFoundError:
+                pass  # Good — not installed
 
     except ImportError:
         warnings.append("importlib.metadata not available")

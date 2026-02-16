@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-Docker Build Verification Script
+Docker Build Verification Script (LlamaIndex 0.14.x + Groq-only)
 
-This script runs DURING Docker build to verify that:
-1. All LlamaIndex components are importable
-2. NLSQLTableQueryEngine is functional
-3. Groq LLM integration is available
-4. No missing dependencies
+Runs DURING Docker build to verify:
+1. Core LlamaIndex imports
+2. NL→SQL engine availability
+3. Groq LLM integration
+4. Required packages installed
 
-If ANY check fails, the Docker build FAILS.
-This ensures broken images cannot be built.
-
-Usage (in Dockerfile):
-    RUN python docker-verify.py
+FAILS build if verification fails.
 """
 
 import sys
@@ -20,14 +16,12 @@ import importlib
 import importlib.metadata
 
 # ============================================================================
-# CONFIGURATION
+# CONFIGURATION (UPDATED FOR LLAMAINDEX 0.14)
 # ============================================================================
 
 REQUIRED_IMPORTS = [
-    ("llama_index", "Meta-package"),
     ("llama_index.core", "Core library"),
     ("llama_index.core.query_engine", "Query engine module"),
-    ("llama_index.core.query_engine.sql_query_engine", "SQL query engine"),
     ("llama_index.llms.groq", "Groq LLM integration"),
     ("fastapi", "FastAPI framework"),
     ("uvicorn", "ASGI server"),
@@ -44,7 +38,6 @@ REQUIRED_CLASSES = [
 ]
 
 REQUIRED_PACKAGES = [
-    "llama-index",
     "llama-index-core",
     "llama-index-llms-groq",
     "fastapi",
@@ -62,7 +55,7 @@ REQUIRED_PACKAGES = [
 
 def main():
     print("=" * 70)
-    print("DOCKER BUILD VERIFICATION")
+    print("DOCKER BUILD VERIFICATION (LlamaIndex 0.12+)")
     print("=" * 70)
     print(f"Python: {sys.version}")
     print(f"Executable: {sys.executable}")
@@ -70,7 +63,9 @@ def main():
 
     errors = []
 
-    # Check 1: Imports
+    # ------------------------------------------------------------------------
+    # 1. Verify imports
+    # ------------------------------------------------------------------------
     print("[1/3] Verifying imports...")
     for import_path, description in REQUIRED_IMPORTS:
         try:
@@ -82,27 +77,33 @@ def main():
 
     print()
 
-    # Check 2: Classes
-    print("[2/3] Verifying NL-SQL classes...")
-    for module_path, class_name in REQUIRED_CLASSES:
+    # ------------------------------------------------------------------------
+    # 2. Verify required classes / objects
+    # ------------------------------------------------------------------------
+    print("[2/3] Verifying NL-SQL components...")
+    for module_path, name in REQUIRED_CLASSES:
         try:
             module = importlib.import_module(module_path)
-            cls = getattr(module, class_name, None)
-            if cls is None:
-                print(f"  [FAIL] {class_name}: not found in {module_path}")
-                errors.append(f"{class_name} not found in {module_path}")
-            elif not callable(cls):
-                print(f"  [FAIL] {class_name}: not callable")
-                errors.append(f"{class_name} is not callable")
+            attr = getattr(module, name, None)
+
+            if attr is None:
+                print(f"  [FAIL] {name}: not found in {module_path}")
+                errors.append(f"{name} not found in {module_path}")
             else:
-                print(f"  [OK] {class_name}")
+                # Settings is NOT callable in 0.12+
+                if name == "Settings":
+                    print(f"  [OK] {name} (singleton object)")
+                else:
+                    print(f"  [OK] {name}")
         except ImportError as e:
-            print(f"  [FAIL] {class_name}: {e}")
+            print(f"  [FAIL] {name}: {e}")
             errors.append(f"Cannot import {module_path}: {e}")
 
     print()
 
-    # Check 3: Package versions
+    # ------------------------------------------------------------------------
+    # 3. Verify package versions
+    # ------------------------------------------------------------------------
     print("[3/3] Verifying package versions...")
     for pkg in REQUIRED_PACKAGES:
         try:
@@ -121,13 +122,11 @@ def main():
         for error in errors:
             print(f"  - {error}")
         print()
-        print("The Docker image cannot be built with missing dependencies.")
         sys.exit(1)
     else:
         print("VERIFICATION PASSED!")
         print("=" * 70)
-        print("All LlamaIndex NL-SQL components verified.")
-        print("Docker image is ready for production.")
+        print("LlamaIndex NL-SQL stack verified successfully.")
         sys.exit(0)
 
 
