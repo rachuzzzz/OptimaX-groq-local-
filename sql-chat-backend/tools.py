@@ -26,8 +26,13 @@ try:
 except ImportError:
     SEMANTIC_HINTS_AVAILABLE = False
 
-# Import pure aggregate query detector (v6.10)
-from sql_validator import is_pure_aggregate_query
+# Centralized LIMIT enforcement (v6.13)
+from sql_validator import enforce_query_bounds
+# Structural execution risk classification (v6.22 — replaces LIMIT-based bypass)
+from execution_risk_classifier import ExecutionRiskClassifier, QueryRiskClass
+
+# Module-level singleton — stateless, thread-safe
+_risk_classifier = ExecutionRiskClassifier()
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +47,15 @@ class DatabaseManager:
     # =========================================================================
     # v6.9: Configurable Cost Guard Thresholds
     # =========================================================================
-    # These thresholds control the preflight cost guard behavior.
-    # Queries with GROUP BY + LIMIT below SAFE_LIMIT_THRESHOLD are always allowed.
+    # COST_THRESHOLD: Max EXPLAIN-estimated rows before blocking (still active).
+    # SAFE_LIMIT_THRESHOLD, MAX_SAFE_JOIN_COUNT: Deprecated by v6.22 structural
+    # execution risk classifier. Retained as named constants so any external
+    # callers that pass safe_limit_threshold= continue to compile, but the
+    # LIMIT-bypass logic that read these values has been removed.
     # =========================================================================
     COST_THRESHOLD = 100000  # Max estimated rows before blocking
-    SAFE_LIMIT_THRESHOLD = 100  # LIMIT value considered safe for bounded aggregations
+    SAFE_LIMIT_THRESHOLD = 100  # DEPRECATED v6.22 — kept for API compat only
+    MAX_SAFE_JOIN_COUNT = 4  # DEPRECATED v6.22 — kept for API compat only
 
     def __init__(self, database_url: str):
         """Initialize database connection"""
@@ -386,21 +395,32 @@ class DatabaseManager:
         self,
         sql: str,
         row_limit: int = 100,
-        cost_threshold: Optional[int] = None
+        cost_threshold: Optional[int] = None,
+        skip_cost_guard: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute SQL with schema normalization, safety validation, and cost guard.
 
         v6.8: Added preflight cost guard to abort expensive queries.
         v6.9: BUG 1 FIX - Cost guard uses configurable class thresholds.
+        v6.16: skip_cost_guard used by execute_validated_sql for cost guard
+               refinement path (user already specified LIMIT).
 
         Args:
             sql: SQL query to execute
             row_limit: Maximum rows to return
             cost_threshold: Maximum estimated rows before aborting (uses class constant if None)
+            skip_cost_guard: If True, skip cost guard (user already refined via LIMIT)
         """
         print(f"[DB] execute_query called with: {sql[:80]}...", flush=True)
         normalized_sql = self._normalize_sql_schema(sql)
+
+        # Safety-net LIMIT enforcement for direct tool calls
+        bound_result = enforce_query_bounds(normalized_sql, row_limit)
+        normalized_sql = bound_result.sql
+        if bound_result.limit_applied:
+            logger.info(f"[BOUNDING] execute_query safety-net: LIMIT enforced (capped={bound_result.was_capped})")
+
         is_valid, validated_sql = self._validate_sql(normalized_sql, row_limit)
         if not is_valid:
             return {
@@ -418,28 +438,36 @@ class DatabaseManager:
         #
         # CRITICAL (v6.9): Bounded aggregations (GROUP BY + LIMIT ≤ SAFE_LIMIT_THRESHOLD)
         # are ALWAYS allowed, regardless of EXPLAIN estimate.
+        #
+        # v6.16: skip_cost_guard=True is used exclusively by the direct SQL
+        # execution path (execute_validated_sql) where the user has already
+        # specified a LIMIT via the cost guard refinement flow.
         # =====================================================================
-        effective_cost_threshold = cost_threshold if cost_threshold is not None else self.COST_THRESHOLD
-        cost_check = self._preflight_cost_check(
-            validated_sql,
-            threshold=effective_cost_threshold,
-            safe_limit_threshold=self.SAFE_LIMIT_THRESHOLD
-        )
-        if not cost_check["safe"]:
-            logger.warning(
-                f"[GUARD] Query aborted: estimated rows too high "
-                f"({cost_check['estimated_rows']:,} > {effective_cost_threshold:,})"
+        if skip_cost_guard:
+            logger.info("[GUARD] Cost guard skipped (user-specified LIMIT refinement)")
+        else:
+            effective_cost_threshold = cost_threshold if cost_threshold is not None else self.COST_THRESHOLD
+            cost_check = self._preflight_cost_check(
+                validated_sql,
+                threshold=effective_cost_threshold,
+                safe_limit_threshold=self.SAFE_LIMIT_THRESHOLD
             )
-            return {
-                "success": False,
-                "error": (
-                    f"Query would scan too many rows ({cost_check['estimated_rows']:,} estimated). "
-                    f"Please narrow your query by adding filters (e.g., date range, specific ID, or route)."
-                ),
-                "error_type": "cost_guard",
-                "estimated_rows": cost_check["estimated_rows"],
-                "sql": validated_sql,
-            }
+            if not cost_check["safe"]:
+                logger.warning(
+                    f"[GUARD] Query blocked: estimated rows too high "
+                    f"({cost_check['estimated_rows']:,} > {effective_cost_threshold:,})"
+                )
+                return {
+                    "success": False,
+                    "error": (
+                        f"Query would scan too many rows ({cost_check['estimated_rows']:,} estimated). "
+                        f"Please narrow your query by adding filters (e.g., date range, specific ID, or route)."
+                    ),
+                    "error_type": "cost_guard",
+                    "estimated_rows": cost_check["estimated_rows"],
+                    "threshold": effective_cost_threshold,
+                    "sql": validated_sql,
+                }
 
         try:
             with self.engine.connect() as conn:
@@ -481,7 +509,11 @@ class DatabaseManager:
             }
 
     def _validate_sql(self, sql_query: str, row_limit: int) -> tuple:
-        """Validate SQL for safety (read-only)"""
+        """Validate SQL for safety (read-only, SELECT-only check).
+
+        LIMIT enforcement has been moved to enforce_query_bounds() in
+        sql_validator.py — this method is now pure safety validation.
+        """
         try:
             parsed = sqlparse.parse(sql_query)
             if not parsed:
@@ -505,21 +537,6 @@ class DatabaseManager:
 
             if not sql_upper.strip().startswith("SELECT"):
                 return False, "Only SELECT statements are allowed"
-
-            # Enforce LIMIT
-            if "LIMIT" not in sql_upper:
-                sql_query = sql_query.rstrip().rstrip(";") + f" LIMIT {row_limit};"
-            else:
-                limit_match = re.search(r"LIMIT\s+(\d+)", sql_upper)
-                if limit_match:
-                    existing_limit = int(limit_match.group(1))
-                    if existing_limit > row_limit:
-                        sql_query = re.sub(
-                            r"LIMIT\s+\d+",
-                            f"LIMIT {row_limit}",
-                            sql_query,
-                            flags=re.IGNORECASE,
-                        )
 
             if not sql_query.rstrip().endswith(";"):
                 sql_query = sql_query.rstrip() + ";"
@@ -552,54 +569,46 @@ class DatabaseManager:
                 estimated_rows: Estimated row count from EXPLAIN
                 error: Error message if EXPLAIN failed
         """
-        sql_upper = sql.upper()
-
         # =====================================================================
-        # v6.10: PURE AGGREGATE QUERY EXCEPTION
+        # v6.22: STRUCTURAL EXECUTION RISK CLASSIFICATION
         # =====================================================================
-        # Pure aggregate queries (COUNT, SUM, AVG, MIN, MAX without GROUP BY)
-        # return exactly ONE ROW regardless of table size.
+        # Replaces the brittle LIMIT-based bypass (v6.9–v6.17) with a
+        # principled, join-aware, grouping-aware, subquery-aware classifier.
         #
-        # Examples that bypass row-scan guard:
-        #   SELECT COUNT(*) FROM flight;
-        #   SELECT AVG(price) FROM booking;
-        #   SELECT MAX(age) FROM passenger;
+        # The previous LIMIT ≤ 100 bypass was structurally incorrect:
+        # LIMIT bounds OUTPUT cardinality, not INTERNAL computation cost.
+        # A 4-JOIN + GROUP BY query with LIMIT 10 still requires the database
+        # to materialise the full join result and compute groups before applying
+        # the LIMIT. The old guard missed this (4 > 4 is False).
         #
-        # These queries do NOT materialize large result sets and are safe.
-        # =====================================================================
-        if is_pure_aggregate_query(sql):
-            print(f"[GUARD] Pure aggregate query detected - skipping cost check (returns exactly 1 row)", flush=True)
-            logger.info(
-                f"[GUARD] Pure aggregate query detected - skipping cost check "
-                f"(returns exactly 1 row)"
-            )
-            return {"safe": True, "estimated_rows": 1, "pure_aggregate": True}
-
-        # =====================================================================
-        # v6.9: BUG 1 FIX - Skip cost guard for bounded aggregations
-        # =====================================================================
-        # PostgreSQL EXPLAIN estimates rows BEFORE LIMIT is applied.
-        # A query like "SELECT ... GROUP BY ... LIMIT 10" may show 100k estimated
-        # rows (total groups), but will only return 10 rows.
+        # The classifier maps every query into one of six risk classes:
         #
-        # RULE: If query has GROUP BY AND LIMIT ≤ safe_limit_threshold,
-        #       it's a bounded top-N aggregation - allow execution.
+        #   PURE_SINGLE_TABLE_LOOKUP      → safe  (LIMIT bounds output directly)
+        #   PURE_SINGLE_TABLE_AGGREGATE   → safe  (returns exactly 1 row)
+        #   GROUPED_SINGLE_TABLE_AGGREGATE → EXPLAIN required
+        #   MULTI_TABLE_JOIN              → EXPLAIN required
+        #   MULTI_TABLE_GROUPED_AGGREGATE → EXPLAIN required (LIMIT ignored)
+        #   COMPLEX_QUERY                 → EXPLAIN required (CTE/subquery/set-op)
+        #
+        # INVARIANT: classification can only raise the protection level, never
+        # lower it. Any error falls back to COMPLEX_QUERY (always checked).
         # =====================================================================
-        has_group_by = 'GROUP BY' in sql_upper
-        has_limit = 'LIMIT' in sql_upper
+        classification = _risk_classifier.classify(sql)
+        _safe_label = "safe — skipping cost check" if not classification.requires_cost_check else "cost check required"
+        print(
+            f"[GUARD] {classification.risk_class.value} — {_safe_label}",
+            flush=True,
+        )
+        logger.info(f"[GUARD] {classification.risk_class.value} — {_safe_label}")
+        logger.debug(f"[GUARD] Classification reasoning: {classification.reasoning}")
 
-        if has_group_by and has_limit:
-            # Extract LIMIT value
-            limit_match = re.search(r'LIMIT\s+(\d+)', sql_upper)
-            if limit_match:
-                limit_value = int(limit_match.group(1))
-                if limit_value <= safe_limit_threshold:
-                    print(f"[GUARD] Bounded aggregation detected: GROUP BY + LIMIT {limit_value} (<= {safe_limit_threshold}) - skipping cost check", flush=True)
-                    logger.info(
-                        f"[GUARD] Bounded aggregation detected: GROUP BY + LIMIT {limit_value} "
-                        f"(<= {safe_limit_threshold}) - skipping cost check"
-                    )
-                    return {"safe": True, "estimated_rows": 0, "bounded_aggregation": True}
+        if not classification.requires_cost_check:
+            return {
+                "safe": True,
+                "estimated_rows": 1 if classification.has_aggregates else 0,
+                "risk_class": classification.risk_class.value,
+            }
+        # All other risk classes fall through to EXPLAIN below.
 
         try:
             # Remove trailing semicolon for EXPLAIN

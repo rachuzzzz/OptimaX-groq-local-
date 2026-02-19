@@ -57,11 +57,23 @@ class SchemaGraph:
     Represents database schema as a graph for join path discovery.
 
     Nodes: Tables
-    Edges: Inferred foreign key relationships based on:
-        - Column name matching (e.g., account_id in both tables)
-        - Type compatibility
-        - Naming conventions (*_id, *_code, etc.)
+    Edges: Built in two phases:
+        Phase 1 — Explicit FK metadata (ground truth, highest confidence)
+        Phase 2 — Column-name inference (heuristic, supplementary)
+
+    FK edges are always preferred over heuristic edges in path scoring.
     """
+
+    # =========================================================================
+    # EDGE SCORES
+    # =========================================================================
+    # FK_EDGE_SCORE: Assigned to edges derived from explicit FK declarations.
+    # Must exceed the maximum achievable heuristic score (~280) so that FK
+    # paths are always selected when both FK and heuristic paths exist.
+    #
+    # HEURISTIC scores: 10.0–280.0 via _calculate_join_score().
+    # =========================================================================
+    FK_EDGE_SCORE: float = 300.0
 
     def __init__(self):
         # Adjacency list: {table_name: [(related_table, join_column, related_column, score)]}
@@ -70,54 +82,192 @@ class SchemaGraph:
         self.tables: Set[str] = set()
         self.schema_cache: Optional[Dict] = None
 
-    def build_from_schema(self, schema_dict: Dict[str, List[Dict]]) -> None:
+    def build_from_schema(
+        self,
+        schema_dict: Dict[str, List[Dict]],
+        fk_metadata: Optional[Dict[str, List[Dict]]] = None,
+    ) -> None:
         """
         Build schema graph from runtime schema introspection.
 
-        Args:
-            schema_dict: {table_name: [{"name": col_name, "type": col_type}, ...]}
+        Two-phase construction:
+            Phase 1 — FK metadata edges (when provided).
+                Each FK declaration in fk_metadata creates a bidirectional edge
+                with score FK_EDGE_SCORE (300.0).  These edges represent declared
+                database constraints — ground truth, not inference.
 
-        Infers relationships using:
-        - Exact column name matches with compatible types
-        - Foreign key naming patterns (*_id, *_code)
+            Phase 2 — Heuristic column-name edges.
+                Existing column-similarity inference.  Edges already covered by
+                FK metadata are skipped (deduplication via added_edges set).
+
+        Args:
+            schema_dict:
+                {table_name: [{"name": col_name, "type": col_type}, ...]}
+                Column metadata for all tables.
+
+            fk_metadata (optional):
+                {table_name: [{"column": str,
+                               "target_table": str,
+                               "target_column": str}, ...]}
+                Explicit FK declarations from database introspection.
+                Matches the structure of DatabaseManager.schema["tables"]
+                [table]["foreign_keys"].  Pass None to use heuristic-only
+                mode (backward-compatible default).
         """
         self.schema_cache = schema_dict
         self.tables = set(schema_dict.keys())
 
         logger.info(f"Building schema graph for {len(self.tables)} tables...")
 
-        # For each table pair, check if columns suggest a relationship
+        # Deduplication set — tracks every directed edge already in the graph.
+        # Key: (source_table, source_col, target_table, target_col)
+        # Prevents duplicate adjacency-list entries when FK and heuristic
+        # inference would both discover the same relationship.
+        added_edges: Set[Tuple[str, str, str, str]] = set()
+        fk_edge_count = 0
+        heuristic_edge_count = 0
+
+        # =====================================================================
+        # PHASE 1 — Explicit FK edges (ground truth)
+        # =====================================================================
+        if fk_metadata:
+            fk_edge_count = self._add_fk_edges(fk_metadata, added_edges)
+            logger.info(
+                f"[DJPI] Phase 1 complete: {fk_edge_count} FK edge(s) "
+                f"from explicit metadata"
+            )
+        else:
+            logger.info(
+                "[DJPI] No FK metadata supplied — Phase 1 skipped. "
+                "Pass fk_metadata to build_from_schema() for accurate "
+                "non-identical FK column join discovery."
+            )
+
+        # =====================================================================
+        # PHASE 2 — Heuristic column-name edges (supplementary)
+        # =====================================================================
         tables_list = list(self.tables)
-        relationship_count = 0
 
         for i, table_a in enumerate(tables_list):
             cols_a = {col["name"]: col["type"] for col in schema_dict[table_a]}
 
-            for table_b in tables_list[i+1:]:  # Avoid duplicate checks
+            for table_b in tables_list[i+1:]:  # Upper-triangle: avoid duplicate pairs
                 cols_b = {col["name"]: col["type"] for col in schema_dict[table_b]}
 
-                # Find matching columns that could indicate a join
                 relationships = self._infer_relationships(
                     table_a, cols_a,
                     table_b, cols_b
                 )
 
                 for col_a, col_b in relationships:
-                    # Calculate join strength score
                     score = self._calculate_join_score(
                         table_a, col_a, cols_a[col_a],
                         table_b, col_b, cols_b[col_b]
                     )
 
-                    # Add bidirectional edge with score
-                    self.graph[table_a].append((table_b, col_a, col_b, score))
-                    self.graph[table_b].append((table_a, col_b, col_a, score))
-                    relationship_count += 1
+                    # Forward edge — skip if already added by FK phase
+                    fwd_key = (table_a, col_a, table_b, col_b)
+                    if fwd_key not in added_edges:
+                        self.graph[table_a].append((table_b, col_a, col_b, score))
+                        added_edges.add(fwd_key)
+                        heuristic_edge_count += 1
+                        logger.info(
+                            f"  [Heuristic] Edge: {table_a}.{col_a} <-> "
+                            f"{table_b}.{col_b} (score: {score:.2f})"
+                        )
 
-                    # DJPI v3 DEBUG: Log all discovered edges with scores
-                    logger.info(f"  Edge: {table_a}.{col_a} <-> {table_b}.{col_b} (score: {score:.2f})")
+                    # Reverse edge — skip if already added by FK phase
+                    rev_key = (table_b, col_b, table_a, col_a)
+                    if rev_key not in added_edges:
+                        self.graph[table_b].append((table_a, col_b, col_a, score))
+                        added_edges.add(rev_key)
 
-        logger.info(f"[OK] Schema graph built: {relationship_count} relationships discovered")
+        total = fk_edge_count + heuristic_edge_count
+        logger.info(
+            f"[OK] Schema graph built: {total} relationship(s) "
+            f"({fk_edge_count} FK, {heuristic_edge_count} heuristic)"
+        )
+
+    def _add_fk_edges(
+        self,
+        fk_metadata: Dict[str, List[Dict]],
+        added_edges: Set[Tuple[str, str, str, str]],
+    ) -> int:
+        """
+        Add bidirectional edges for every explicit FK declaration.
+
+        Edges are added with FK_EDGE_SCORE (300.0) — above all heuristic
+        scores — so FK-derived paths are preferred by find_join_path().
+
+        Args:
+            fk_metadata:
+                {table_name: [{"column": str,
+                               "target_table": str,
+                               "target_column": str}, ...]}
+            added_edges:
+                Mutable set tracking all directed edges added so far.
+                Updated in-place to allow deduplication in Phase 2.
+
+        Returns:
+            Number of FK declarations processed (each yields two directed edges).
+        """
+        fk_count = 0
+
+        for source_table, fk_list in fk_metadata.items():
+            if source_table not in self.tables:
+                # Table not in schema_dict — skip silently (graceful degradation)
+                continue
+
+            for fk in fk_list:
+                source_col = fk.get("column", "")
+                target_table = fk.get("target_table", "")
+                target_col = fk.get("target_column", "")
+
+                if not source_col or not target_table or not target_col:
+                    logger.debug(
+                        f"[DJPI] Skipping incomplete FK on {source_table}: {fk}"
+                    )
+                    continue
+
+                if target_table not in self.tables:
+                    # Cross-schema or external FK — not representable in this graph
+                    logger.debug(
+                        f"[DJPI] Skipping cross-schema FK: "
+                        f"{source_table}.{source_col} → "
+                        f"{target_table}.{target_col} "
+                        f"(target not in graph)"
+                    )
+                    continue
+
+                # Forward edge: source_table.source_col → target_table.target_col
+                fwd_key = (source_table, source_col, target_table, target_col)
+                if fwd_key not in added_edges:
+                    self.graph[source_table].append(
+                        (target_table, source_col, target_col, self.FK_EDGE_SCORE)
+                    )
+                    added_edges.add(fwd_key)
+                    logger.info(
+                        f"  [FK] Edge: {source_table}.{source_col} → "
+                        f"{target_table}.{target_col} "
+                        f"(score: {self.FK_EDGE_SCORE:.1f})"
+                    )
+
+                # Reverse edge: target_table.target_col → source_table.source_col
+                rev_key = (target_table, target_col, source_table, source_col)
+                if rev_key not in added_edges:
+                    self.graph[target_table].append(
+                        (source_table, target_col, source_col, self.FK_EDGE_SCORE)
+                    )
+                    added_edges.add(rev_key)
+                    logger.info(
+                        f"  [FK] Edge: {target_table}.{target_col} → "
+                        f"{source_table}.{source_col} "
+                        f"(score: {self.FK_EDGE_SCORE:.1f})"
+                    )
+
+                fk_count += 1
+
+        return fk_count
 
     def _infer_relationships(
         self,
@@ -389,7 +539,7 @@ class SchemaGraph:
         self,
         source_table: str,
         target_table: str,
-        max_depth: int = 4
+        max_depth: Optional[int] = None,
     ) -> Optional[List[Tuple[str, str, str, str]]]:
         """
         Find highest-scoring join path between two tables.
@@ -398,19 +548,24 @@ class SchemaGraph:
         cumulative join strength scores instead of minimizing hops.
 
         DJPI v3 GUARANTEES:
-        - Acyclic paths only (no table visited twice)
-        - Maximum depth of 4 hops (HARD limit)
-        - Minimum edge score threshold (rejects weak joins if alternatives exist)
+        - Acyclic paths only (no table visited twice in a single path)
+        - Depth bound: defaults to len(self.tables) — covers all paths in the
+          connected component; the per-path visited set is the primary cycle
+          guard and renders this bound unreachable in correct operation
+        - Minimum edge score threshold (rejects very weak joins)
         - Cost-aware optimization (prefers fewer hops when scores are close)
 
         Args:
             source_table: Starting table (e.g., 'frequent_flyer')
             target_table: Destination table (e.g., 'flight')
-            max_depth: Maximum join hops allowed (default: 4, HARD cap)
+            max_depth: Maximum join hops allowed.
+                Default (None): derived from len(self.tables), enabling full
+                connected-component reachability.  Pass an explicit integer
+                to impose a tighter limit (e.g., for performance tuning).
 
         Returns:
             List of join steps: [(from_table, from_col, to_table, to_col), ...]
-            None if no path exists
+            None if no path exists within the connected component
         """
         if source_table not in self.tables or target_table not in self.tables:
             logger.warning(f"Table not found: {source_table} or {target_table}")
@@ -418,6 +573,25 @@ class SchemaGraph:
 
         if source_table == target_table:
             return []  # Same table, no join needed
+
+        # =====================================================================
+        # DEPTH BOUND
+        # =====================================================================
+        # When max_depth is not provided, use len(self.tables) as the effective
+        # bound.  Because every path enforces acyclicity via a per-path visited
+        # set (no table revisited), the maximum possible path length is
+        # len(tables) - 1 edges.  Setting effective_depth = len(tables) means
+        # the depth check below is mathematically unreachable in valid
+        # operation — it is kept purely as a defensive safety net.
+        #
+        # Why NOT a hardcoded constant (e.g., 4):
+        #   A fixed cap silently returns None for any join path that requires
+        #   more edges than the constant allows, even when all FK edges exist
+        #   in the graph.  The prior default of 4 caused failures on 5-hop
+        #   paths (e.g., passenger → booking → booking_leg → flight → aircraft
+        #   → aircraft_model) in moderately normalised schemas.
+        # =====================================================================
+        effective_depth = max_depth if max_depth is not None else len(self.tables)
 
         # Minimum edge score threshold - reject very weak joins
         # Unless no other path exists, edges scoring below this are ignored
@@ -435,12 +609,20 @@ class SchemaGraph:
         all_paths_to_target = []
         rejected_paths = []  # Track why paths were rejected (for debug logging)
 
+        logger.debug(
+            f"[DJPI] find_join_path: {source_table} → {target_table} "
+            f"(effective_depth={effective_depth}, tables={len(self.tables)})"
+        )
+
         while pq:
             neg_score, hop_count, current_table, path, visited_tables = heapq.heappop(pq)
             current_score = -neg_score  # Convert back to positive
 
-            # Check depth limit (HARD cap at 4)
-            if hop_count >= max_depth:
+            # Depth safety net — unreachable in practice when effective_depth
+            # = len(tables) because the visited set prevents revisiting nodes,
+            # bounding path length to len(tables)-1.  Fires only if an explicit
+            # max_depth is passed that is smaller than the natural path length.
+            if hop_count >= effective_depth:
                 continue
 
             # If we've already found a better path to this table, skip

@@ -57,6 +57,68 @@ def get_schema_reference() -> Optional[Dict[str, Any]]:
     return _schema_reference
 
 
+# =============================================================================
+# SCHEMA GRAPH REFERENCE (v6.14 - FK Reachability for Intent Gating)
+# =============================================================================
+# Holds a reference to the DJPI SchemaGraph for FK path queries.
+# If not set, falls back to BFS over schema foreign_keys metadata.
+#
+# CRITICAL: Used ONLY for FK reachability checks in intent gating.
+# =============================================================================
+_schema_graph_reference = None
+
+
+def set_schema_graph_reference(graph) -> None:
+    """
+    Set schema graph reference for FK reachability checks.
+
+    Called once during system initialization. Uses existing SchemaGraph
+    from join_path_inference — does NOT reconstruct it.
+
+    Args:
+        graph: SchemaGraph instance (from join_path_inference)
+    """
+    global _schema_graph_reference
+    _schema_graph_reference = graph
+    if graph and hasattr(graph, 'tables'):
+        logger.info(f"[ACCUMULATOR] Schema graph reference set ({len(graph.tables)} tables)")
+    else:
+        logger.info("[ACCUMULATOR] Schema graph reference set (empty or None)")
+
+
+def get_schema_graph_reference():
+    """Get the current schema graph reference (for FK reachability)."""
+    return _schema_graph_reference
+
+
+# =============================================================================
+# FK REACHABILITY CONSTANTS (v6.14)
+# =============================================================================
+# Maximum FK hops for intent-level reachability. Limits projection scope
+# to closely-related tables. 2 hops allows entity → bridge → target.
+# =============================================================================
+MAX_FK_HOPS = 2
+
+# =============================================================================
+# BFS DEPTH GUARD (v6.17 Audit)
+# =============================================================================
+# Maximum traversal depth for the BFS fallback in _is_fk_reachable_via_schema().
+# Applied ONLY when SchemaGraph is unavailable.
+#
+# The SchemaGraph primary path (find_join_path) uses a schema-size-derived
+# effective depth (len(tables)) — NOT a fixed constant.  The hard cap of 4
+# that existed in the DJPI default was removed in v6.19 because it silently
+# blocked legitimate 5+ hop paths in normalised schemas.
+#
+# This BFS constant (MAX_GRAPH_DEPTH = 5) is a conservative guard for the
+# fallback path only.  It is intentionally slightly above typical schema
+# depths to prevent full-graph traversal on large schemas (50+ tables) when
+# SchemaGraph is unavailable.  It does NOT reflect a traversal limit on the
+# SchemaGraph primary path.
+# =============================================================================
+MAX_GRAPH_DEPTH = 5
+
+
 # Safe defaults applied when values not specified
 SAFE_DEFAULTS = {
     "time_scope": "all_time",
@@ -147,45 +209,15 @@ COMPARISON_KEYWORDS = {
 
 
 # =============================================================================
-# AMBIGUOUS SEMANTIC ALIASES (v6.7 - Entity Disambiguation)
+# ENTITY DISAMBIGUATION (v6.15 - Schema-Driven via entity_resolver.py)
 # =============================================================================
-# These semantic terms map to MULTIPLE base tables in typical airline schemas.
-# They MUST trigger clarification, NEVER silent inference.
+# Entity disambiguation is now handled by entity_resolver.py which matches
+# against the live schema. No hardcoded domain mappings.
 #
-# Example: "customer" could mean:
-#   - passenger (person who flies)
-#   - account (login/billing entity)
-#   - frequent_flyer (loyalty program member)
-#
-# RULE: If entity_type matches an ambiguous alias -> CLARIFY
+# When entity_resolver returns status="ambiguous", the candidates are stored
+# on IntentState.entity_resolution_candidates and trigger clarification
+# through is_ambiguous_entity() / get_ambiguous_entity_info().
 # =============================================================================
-AMBIGUOUS_SEMANTIC_ALIASES = {
-    "customer": {
-        "options": ["passenger", "account", "frequent_flyer"],
-        "question": "By 'customer', do you mean:",
-        "descriptions": {
-            "passenger": "People who have booked flights",
-            "account": "User accounts (login/billing)",
-            "frequent_flyer": "Loyalty program members",
-        }
-    },
-    "user": {
-        "options": ["passenger", "account"],
-        "question": "By 'user', do you mean:",
-        "descriptions": {
-            "passenger": "People who have booked flights",
-            "account": "System user accounts",
-        }
-    },
-    "member": {
-        "options": ["passenger", "frequent_flyer"],
-        "question": "By 'member', do you mean:",
-        "descriptions": {
-            "passenger": "Any passenger",
-            "frequent_flyer": "Loyalty program members",
-        }
-    },
-}
 
 
 # =============================================================================
@@ -253,18 +285,13 @@ def _find_table_for_entity(entity_type: str, schema: Dict[str, Any]) -> Optional
 
     entity_lower = entity_type.lower().strip()
 
-    # Common entity-to-table mappings (singular to potentially plural)
+    # Schema-driven entity-to-table matching (singular/plural only)
+    # v6.15: Removed hardcoded synonyms (customer↔passenger etc.)
     entity_variants = [entity_lower]
     if entity_lower.endswith("s"):
         entity_variants.append(entity_lower[:-1])  # passengers -> passenger
     else:
         entity_variants.append(entity_lower + "s")  # passenger -> passengers
-
-    # Also handle common synonyms
-    if entity_lower in ("customer", "customers"):
-        entity_variants.extend(["passenger", "passengers", "client", "clients"])
-    if entity_lower in ("passenger", "passengers"):
-        entity_variants.extend(["customer", "customers"])
 
     for table_name in schema["tables"].keys():
         # Extract simple table name (without schema prefix)
@@ -317,6 +344,383 @@ def _get_fk_targets(table_name: str, schema: Dict[str, Any]) -> List[Dict[str, s
         return []
 
     return table_info.get("foreign_keys", [])
+
+
+# =============================================================================
+# FK REACHABILITY ENGINE (v6.14 - Intent-Level Projection Gating)
+# =============================================================================
+# Pure functions for checking whether a metric's table is FK-reachable
+# from the entity's table. Uses schema_graph if available, otherwise
+# falls back to BFS over schema foreign_keys metadata.
+#
+# INVARIANTS:
+# - Deterministic, stateless, no model inference
+# - Does NOT reconstruct schema graph (uses existing)
+# - Does NOT modify intent state
+# - Returns conservative results (if unsure, allow)
+# =============================================================================
+
+@dataclass
+class FKProjectionResult:
+    """
+    Result of FK projection check.
+
+    Attributes:
+        allowed: Whether the projection is allowed
+        entity_table: Resolved entity table (fully-qualified)
+        metric_table: Resolved metric table (fully-qualified, if single)
+        reason: Why the result was reached
+        reachable_tables: FK-reachable tables containing the metric
+        unreachable_tables: Non-reachable tables containing the metric
+    """
+    allowed: bool
+    entity_table: Optional[str] = None
+    metric_table: Optional[str] = None
+    reason: str = ""
+    reachable_tables: List[str] = field(default_factory=list)
+    unreachable_tables: List[str] = field(default_factory=list)
+
+
+def _resolve_metric_tables(metric: str, schema: Dict[str, Any]) -> List[str]:
+    """
+    Resolve which table(s) contain a column matching the metric.
+
+    Database-agnostic: searches all tables' columns for matches.
+    Returns list of fully-qualified table names.
+
+    Matching strategies (in order):
+    1. Exact column name match
+    2. Table-prefixed match (e.g., "booking_price" → booking.price)
+    3. Underscore-normalized match
+    """
+    if not metric or not schema or "tables" not in schema:
+        return []
+
+    metric_lower = metric.lower().strip().replace(" ", "_")
+    candidates = []
+
+    for table_name, table_info in schema["tables"].items():
+        simple_table = table_name.split(".")[-1].lower()
+        columns = {c["name"].lower() for c in table_info.get("columns", [])}
+
+        # Strategy 1: Exact column name match
+        if metric_lower in columns:
+            candidates.append(table_name)
+            continue
+
+        # Strategy 2: Table-prefixed match
+        # "booking_price" → table "booking", column "price"
+        if metric_lower.startswith(simple_table + "_"):
+            remainder = metric_lower[len(simple_table) + 1:]
+            if remainder in columns:
+                candidates.append(table_name)
+                continue
+
+        # Strategy 3: Underscore-normalized match
+        metric_norm = metric_lower.replace("_", "")
+        for col in columns:
+            if metric_norm == col.replace("_", ""):
+                candidates.append(table_name)
+                break
+
+    return candidates
+
+
+def _is_fk_reachable_via_schema(
+    source: str,
+    target: str,
+    schema: Dict[str, Any],
+) -> bool:
+    """
+    Check FK reachability using schema foreign_keys metadata (BFS).
+
+    Fallback for when SchemaGraph is not available.
+    Traverses both forward FKs (this table → target) and reverse FKs
+    (other table → this table) to find any relational path.
+
+    Cycle-safe: visited set prevents infinite loops on cyclic graphs.
+    No hop limit: the visited set is the only termination condition,
+    matching the behaviour of the SchemaGraph path (max_depth=4).
+
+    Args:
+        source: Source table (fully-qualified)
+        target: Target table (fully-qualified)
+        schema: Schema dict with tables and foreign_keys
+
+    Returns:
+        True if target is reachable from source via any FK path
+    """
+    if source == target:
+        return True
+    if not schema or "tables" not in schema:
+        return True  # No schema → conservative: don't block
+
+    visited = {source}
+    queue = [(source, 0)]  # (table, depth)
+
+    while queue:
+        current, depth = queue.pop(0)
+
+        # Safety cap: prevents BFS from traversing the entire graph on
+        # large schemas. MAX_GRAPH_DEPTH=5 covers all realistic multi-hop
+        # paths; the SchemaGraph primary path caps at 4 independently.
+        if depth >= MAX_GRAPH_DEPTH:
+            continue
+
+        table_info = schema["tables"].get(current)
+        if not table_info:
+            continue
+
+        # Forward FKs: current table references other tables
+        for fk in table_info.get("foreign_keys", []):
+            fk_target = fk.get("target_table", "")
+            if fk_target == target:
+                return True
+            if fk_target and fk_target not in visited:
+                visited.add(fk_target)
+                queue.append((fk_target, depth + 1))
+
+        # Reverse FKs: other tables reference current table
+        for other_table, other_info in schema["tables"].items():
+            if other_table in visited:
+                continue
+            for fk in other_info.get("foreign_keys", []):
+                if fk.get("target_table") == current:
+                    if other_table == target:
+                        return True
+                    visited.add(other_table)
+                    queue.append((other_table, depth + 1))
+                    break  # One FK per table is enough for reachability
+
+    return False
+
+
+def _is_metric_fk_reachable(entity_table: str, metric_table: str) -> bool:
+    """
+    Check if metric_table is FK-reachable from entity_table.
+
+    Uses SchemaGraph if available (preferred), otherwise falls back
+    to BFS over schema foreign_keys metadata.
+
+    Args:
+        entity_table: Entity's table (fully-qualified)
+        metric_table: Metric's table (fully-qualified)
+
+    Returns:
+        True if reachable, False otherwise
+    """
+    if entity_table == metric_table:
+        return True
+
+    entity_simple = entity_table.split(".")[-1]
+    metric_simple = metric_table.split(".")[-1]
+
+    # Try SchemaGraph first (if available)
+    graph = get_schema_graph_reference()
+    if graph:
+        # find_join_path uses a schema-size-derived depth bound (v6.19) —
+        # no explicit max_depth passed here.  All paths within the connected
+        # component are discoverable; the visited set prevents cycles.
+        path = graph.find_join_path(entity_table, metric_table)
+        reachable = path is not None
+        hop_count = len(path) if path else 0
+        logger.info(
+            f"[INTENT] FK reachability check: "
+            f"{entity_simple} -> {metric_simple} = {reachable} "
+            f"(via schema_graph, {hop_count} hop(s))"
+        )
+        return reachable
+
+    # SchemaGraph not available — warn and fall back to BFS over FK metadata.
+    # This happens when set_schema_graph_reference() was not called at startup.
+    logger.warning(
+        f"[INTENT] SchemaGraph not available — using FK metadata BFS fallback. "
+        f"Ensure set_schema_graph_reference() is called during initialization."
+    )
+    schema = get_schema_reference()
+    reachable = _is_fk_reachable_via_schema(entity_table, metric_table, schema)
+    logger.info(
+        f"[INTENT] FK reachability check: "
+        f"{entity_simple} -> {metric_simple} = {reachable} (via schema FK metadata)"
+    )
+    return reachable
+
+
+def _detect_referenced_tables(query: str, schema: Dict[str, Any]) -> List[str]:
+    """
+    Detect table name references in a natural language query.
+
+    Uses word-boundary matching with plural tolerance.
+    Returns list of fully-qualified table names found in the query.
+
+    Args:
+        query: Natural language user query
+        schema: Schema dict with tables
+
+    Returns:
+        List of fully-qualified table names referenced in the query
+    """
+    if not query or not schema or "tables" not in schema:
+        return []
+
+    query_lower = query.lower()
+    referenced = []
+
+    for table_name in schema["tables"]:
+        simple = table_name.split(".")[-1].lower()
+        # Word boundary match with optional plural suffix
+        if re.search(r'\b' + re.escape(simple) + r'(?:s|es)?\b', query_lower):
+            referenced.append(table_name)
+
+    return referenced
+
+
+def _check_fk_projection(state: "IntentState") -> FKProjectionResult:
+    """
+    Check if the current intent's metric/column references are FK-reachable
+    from the entity's table.
+
+    This is the centralized FK projection gate. It handles:
+    1. Metric-based check: when metric resolves to a specific table column
+    2. NL reference check: when the original query mentions other table names
+
+    Returns FKProjectionResult with allowed=True/False and reason.
+
+    INVARIANTS:
+    - Pure function (deterministic, no side effects)
+    - Conservative: if unsure, returns allowed=True
+    - Does NOT auto-select join paths if multiple exist
+    """
+    schema = get_schema_reference()
+    if not schema:
+        return FKProjectionResult(allowed=True, reason="no_schema")
+
+    entity_table = _find_table_for_entity(state.entity_type, schema)
+    if not entity_table:
+        return FKProjectionResult(allowed=True, reason="entity_table_not_found")
+
+    # --- Path 1: Metric-based FK check ---
+    # When metric is a domain term (not action verb, not bare aggregation),
+    # resolve which table it belongs to and check FK reachability.
+    if state.metric and not state.row_select:
+        metric_lower = state.metric.lower().strip()
+        if (metric_lower not in INVALID_METRIC_TOKENS
+                and metric_lower not in BARE_AGGREGATION_PRIMITIVES):
+            metric_tables = _resolve_metric_tables(state.metric, schema)
+            if metric_tables:
+                # Entity table itself has the column → same table
+                if entity_table in metric_tables:
+                    return FKProjectionResult(
+                        allowed=True,
+                        entity_table=entity_table,
+                        metric_table=entity_table,
+                        reason="same_table",
+                    )
+
+                reachable = [
+                    mt for mt in metric_tables
+                    if _is_metric_fk_reachable(entity_table, mt)
+                ]
+                unreachable = [mt for mt in metric_tables if mt not in reachable]
+
+                if not reachable:
+                    return FKProjectionResult(
+                        allowed=False,
+                        entity_table=entity_table,
+                        unreachable_tables=unreachable,
+                        reason="no_fk_path",
+                    )
+
+                if len(reachable) == 1:
+                    logger.info("[INTENT] Multi-table projection allowed via FK path")
+                    return FKProjectionResult(
+                        allowed=True,
+                        entity_table=entity_table,
+                        metric_table=reachable[0],
+                        reachable_tables=reachable,
+                        reason="fk_reachable",
+                    )
+
+                # Multiple FK-reachable tables contain the metric → ambiguous
+                logger.info(
+                    f"[INTENT] Multiple FK-reachable metric tables: "
+                    f"{[t.split('.')[-1] for t in reachable]}"
+                )
+                return FKProjectionResult(
+                    allowed=False,
+                    entity_table=entity_table,
+                    reachable_tables=reachable,
+                    reason="multiple_fk_paths",
+                )
+
+    # --- Path 3: ALSR attribute binding FK check (v6.22) ---
+    # When ALSR has resolved cross-table bindings (from_entity_table=False),
+    # verify each binding's column table is FK-reachable from the entity table.
+    #
+    # This is the AUTHORITATIVE FK gate for ALSR bindings — it uses the same
+    # _is_metric_fk_reachable() function (SchemaGraph primary, BFS fallback)
+    # as Path 1, ensuring consistent reachability semantics.
+    #
+    # Uses getattr() for safe access since attribute_bindings is List[Any].
+    # Only triggers for cross-table bindings (entity_table != column table).
+    if entity_table and hasattr(state, 'attribute_bindings'):
+        for binding in state.attribute_bindings:
+            binding_entity_table = getattr(binding, 'entity_table', None)
+            binding_col_table    = getattr(binding, 'table', None)
+            from_entity_table    = getattr(binding, 'from_entity_table', True)
+
+            # Skip same-table bindings (already validated by entity resolution)
+            if from_entity_table or not binding_col_table or not binding_entity_table:
+                continue
+            if binding_col_table == binding_entity_table:
+                continue
+
+            # Resolve the column's table to a fully-qualified name
+            column_fq = next(
+                (t for t in schema["tables"]
+                 if t.split(".")[-1].lower() == binding_col_table.lower()),
+                None,
+            )
+            if not column_fq:
+                continue  # Unknown table → conservative: don't block
+
+            if not _is_metric_fk_reachable(entity_table, column_fq):
+                col_simple    = binding_col_table
+                entity_simple = entity_table.split(".")[-1]
+                phrase        = getattr(binding, 'phrase', binding_col_table)
+                logger.info(
+                    f"[INTENT] ALSR binding not FK-reachable: "
+                    f"entity={entity_simple} → attr_table={col_simple} "
+                    f"(phrase='{phrase}')"
+                )
+                return FKProjectionResult(
+                    allowed=False,
+                    entity_table=entity_table,
+                    unreachable_tables=[column_fq],
+                    reason=ClarificationReason.ALSR_BINDING_FK_NOT_REACHABLE,
+                )
+
+    # --- Path 2: NL table-reference check ---
+    # For row_select queries or when metric doesn't resolve to a column,
+    # scan the original query for table name mentions and verify reachability.
+    if state.original_query:
+        referenced = _detect_referenced_tables(state.original_query, schema)
+        for ref_table in referenced:
+            if ref_table != entity_table and not _is_metric_fk_reachable(entity_table, ref_table):
+                ref_simple = ref_table.split(".")[-1]
+                entity_simple = entity_table.split(".")[-1]
+                logger.info(
+                    f"[INTENT] NL reference to non-reachable table: "
+                    f"{entity_simple} -> {ref_simple}"
+                )
+                return FKProjectionResult(
+                    allowed=False,
+                    entity_table=entity_table,
+                    unreachable_tables=[ref_table],
+                    reason="no_fk_path",
+                )
+
+    return FKProjectionResult(allowed=True, entity_table=entity_table, reason="pass")
 
 
 def suggest_metrics_for_entity(
@@ -505,6 +909,30 @@ class PendingAmbiguity:
 
 
 @dataclass
+class PendingCostGuard:
+    """
+    Tracks a pending cost guard clarification awaiting user response.
+
+    v6.16: Conversational cost guard — numeric LIMIT refinement.
+
+    Populated when EXPLAIN estimates exceed the cost threshold.
+    Stores the VALIDATED SQL so re-execution requires NO LLM call.
+    The user is asked how many rows they want; the stored SQL is
+    rewritten with the new LIMIT and executed directly.
+
+    Attributes:
+        estimated_rows: EXPLAIN-estimated row scan count
+        threshold: Cost threshold that was exceeded
+        original_sql: Validated, normalized SQL that triggered the guard
+        original_limit: LIMIT value in the original SQL (None if absent)
+    """
+    estimated_rows: int
+    threshold: int
+    original_sql: str
+    original_limit: Optional[int]
+
+
+@dataclass
 class IntentState:
     """
     Session-scoped accumulated intent state.
@@ -517,6 +945,7 @@ class IntentState:
 
     v6.1.1: Added relational_ambiguity for RCL clarification loop.
     v6.10: Added row_select flag for MVP row-selection queries.
+    v6.16: Added cost guard refinement state.
     """
     entity_type: Optional[str] = None
     metric: Optional[str] = None
@@ -539,6 +968,26 @@ class IntentState:
     # True when query is a simple row-selection (no aggregation needed)
     row_select: bool = False
 
+    # Entity resolution candidates (v6.15)
+    # Populated by entity_resolver when status="ambiguous" (2+ matches)
+    entity_resolution_candidates: List[Any] = field(default_factory=list)
+
+    # Cost guard refinement state (v6.16)
+    # Populated when EXPLAIN estimate exceeds threshold; stores validated SQL
+    # for direct re-execution with user-specified LIMIT (no LLM needed)
+    pending_cost_guard: Optional[PendingCostGuard] = None
+
+    # ALSR: Attribute-level bindings (v6.22)
+    # Populated by semantic_attribute_resolver when composite phrases like
+    # "aircraft model" are decomposed into qualified column references like
+    # "aircraft_type.model". Carries binding metadata for NL-SQL hints.
+    attribute_bindings: List[Any] = field(default_factory=list)
+
+    # ALSR: Group-by column targets derived from entity_type attribute bindings (v6.22)
+    # e.g., ["aircraft_type.model"] when entity_type was "aircraft model"
+    # The NL-SQL generator can use these as GROUP BY column hints.
+    group_by_targets: List[str] = field(default_factory=list)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "entity_type": self.entity_type,
@@ -554,6 +1003,26 @@ class IntentState:
             "pending_ambiguity": self.pending_ambiguity.__dict__ if self.pending_ambiguity else None,
             "resolved_fk_preferences": self.resolved_fk_preferences,
             "row_select": self.row_select,
+            "entity_resolution_candidates": [
+                {"table_name": c.table_name, "simple_name": c.simple_name, "score": c.score}
+                for c in self.entity_resolution_candidates
+            ] if self.entity_resolution_candidates else [],
+            "pending_cost_guard": self.pending_cost_guard.__dict__ if self.pending_cost_guard else None,
+            # v6.22: ALSR attribute bindings
+            "attribute_bindings": [
+                {
+                    "phrase":           b.phrase,
+                    "table":            b.table,
+                    "column":           b.column,
+                    "qualified":        b.qualified,
+                    "entity_table":     getattr(b, "entity_table", b.table),
+                    "from_entity_table": getattr(b, "from_entity_table", True),
+                    "strategy":         b.strategy,
+                    "confidence":       b.confidence,
+                }
+                for b in self.attribute_bindings
+            ] if self.attribute_bindings else [],
+            "group_by_targets": self.group_by_targets,
         }
 
     def has_entity(self) -> bool:
@@ -564,63 +1033,97 @@ class IntentState:
         """
         Is metric known AND complete?
 
-        v6.2 CHANGE: Bare aggregation primitives (count, sum, etc.) are NOT
-        complete metrics when used with rankings like "top passengers".
-        They must be bound to a domain column to be considered complete.
+        v6.2: Bare aggregation primitives require dimensional context with rankings.
+        v6.4: Invalid metric tokens (action verbs) are never metrics.
+        v6.8: Bare aggregation + event = COMPLETE (event provides binding).
+        v6.22: ALSR group_by_targets satisfies aggregation completeness.
+              COUNT is always complete as a standalone entity count.
 
-        v6.4 CHANGE: Invalid metric tokens (list, show, get, etc.) are NOT
-        metrics at all. They are action verbs that describe the operation,
-        not how to measure. These MUST trigger clarification.
+        COMPLETENESS CONTRACT:
+        ┌────────────────────────────────────────────────────────────┐
+        │ Domain metric (not a bare primitive)  → always COMPLETE    │
+        │ Ranking present:                                           │
+        │   event OR group_by_targets exist    → COMPLETE            │
+        │   else                               → INCOMPLETE          │
+        │ No ranking:                                                │
+        │   group_by_targets exist             → COMPLETE            │
+        │   event exists                       → COMPLETE            │
+        │   metric == "count"                  → COMPLETE            │
+        │   else (avg/sum/min/max/total alone) → INCOMPLETE          │
+        └────────────────────────────────────────────────────────────┘
 
-        v6.8 CHANGE: Bare aggregation + event = COMPLETE.
-        "top passengers by booking count" has metric=count AND event=bookings,
-        which together form a complete metric. This should NOT clarify.
-
-        RULE:
-        - metric in INVALID_METRIC_TOKENS -> INVALID (not a metric at all)
-        - metric in BARE_AGGREGATION_PRIMITIVES AND ranking AND NO event -> INCOMPLETE
-        - metric in BARE_AGGREGATION_PRIMITIVES AND event -> COMPLETE (bound to event)
-        - metric has domain binding (e.g., "booking_value", "flight_count") -> COMPLETE
-        - explicit aggregation field set -> COMPLETE (user clarified)
+        COUNT(*) FROM entity is always valid SQL and requires no dimension.
+        Non-count bare aggregations without a dimension are semantically
+        incomplete ("average aircraft" — average of what column?).
         """
         metric_val = self.metric
         if metric_val is None or metric_val == "unknown":
-            # Check aggregation as fallback
+            # Aggregation field can rescue an otherwise missing metric
             if self.aggregation is not None and self.aggregation not in (None, "none"):
                 return True
             return False
 
         metric_lower = metric_val.lower().strip()
 
-        # v6.4: Invalid metric tokens are NOT metrics
-        # "list", "show", "get", etc. are action verbs, not measurement dimensions.
-        # "Who are the best customers?" with metric=list is INVALID because
-        # "list" says nothing about what makes a customer "best".
+        # v6.4: Action verbs are never measurement dimensions
         if metric_lower in INVALID_METRIC_TOKENS:
             logger.debug(f"[INTENT] Invalid metric token rejected: '{metric_lower}'")
             return False
 
-        # v6.2 + v6.8: Bare aggregation primitives with ranking
-        # "top passengers" with metric=count is INCOMPLETE (count of what?)
-        # BUT "top passengers by booking count" is COMPLETE (count bound to bookings)
-        if metric_lower in BARE_AGGREGATION_PRIMITIVES:
-            if self.ranking in ("top_n", "bottom_n"):
-                # v6.8: Check if event provides the binding
-                # If event is set (e.g., "bookings"), the aggregation is bound
-                if self.event and self.event.lower() not in ("unknown", "none", ""):
-                    logger.debug(
-                        f"[INTENT] Bare aggregation '{metric_lower}' bound to event "
-                        f"'{self.event}' - COMPLETE"
-                    )
-                    return True
+        # Domain-specific metrics (e.g. "booking_value", "flight_count") carry
+        # their own binding — they need no further dimensional context.
+        if metric_lower not in BARE_AGGREGATION_PRIMITIVES:
+            return True
 
-                # Bare primitive + ranking + no event = incomplete
+        # --- Bare aggregation primitive completeness (v6.22) ---
+        # Pre-compute dimensional context once so branch logic is unambiguous.
+        has_event = (
+            bool(self.event)
+            and self.event.lower() not in ("unknown", "none", "")
+        )
+        has_group_by = bool(getattr(self, "group_by_targets", None))
+
+        if self.ranking in ("top_n", "bottom_n"):
+            # Ranking queries require an explicit grouping dimension.
+            if has_event or has_group_by:
                 logger.debug(
-                    f"[INTENT] Bare aggregation '{metric_lower}' with ranking but no event - INCOMPLETE"
+                    f"[INTENT] '{metric_lower}' + ranking bound to "
+                    f"event={self.event!r} / group_by={getattr(self, 'group_by_targets', None)}"
+                    f" - COMPLETE"
                 )
-                return False
+                return True
+            logger.debug(
+                f"[INTENT] '{metric_lower}' + ranking but no event/group_by - INCOMPLETE"
+            )
+            return False
 
-        return True
+        # Non-ranking: any established grouping dimension satisfies completeness.
+        if has_group_by:
+            logger.debug(
+                f"[INTENT] '{metric_lower}' bound to "
+                f"group_by_targets={getattr(self, 'group_by_targets', None)} - COMPLETE"
+            )
+            return True
+
+        if has_event:
+            logger.debug(
+                f"[INTENT] '{metric_lower}' bound to event={self.event!r} - COMPLETE"
+            )
+            return True
+
+        # COUNT is always a valid standalone entity count.
+        # SELECT COUNT(*) FROM <entity> is unambiguous regardless of dimension.
+        if metric_lower == "count":
+            logger.debug("[INTENT] Simple entity count — no dimension required - COMPLETE")
+            return True
+
+        # avg / sum / total / min / max without any grouping dimension are
+        # semantically incomplete: the query does not identify which column
+        # or domain to aggregate over.
+        logger.debug(
+            f"[INTENT] '{metric_lower}' — bare aggregation with no dimension - INCOMPLETE"
+        )
+        return False
 
     def is_row_select_query(self) -> bool:
         """
@@ -742,24 +1245,22 @@ class IntentState:
 
     def is_ambiguous_entity(self) -> bool:
         """
-        Check if entity_type is an ambiguous semantic alias.
+        Check if entity_type has multiple schema-driven resolution candidates.
 
-        v6.7: BUG 4 FIX - Semantic alias drift detection.
+        v6.15: Schema-driven via entity_resolution_candidates (set by
+        entity_resolver.py in query_pipeline.py). Replaces hardcoded
+        AMBIGUOUS_SEMANTIC_ALIASES.
 
-        "customer" can mean passenger, account, or frequent_flyer.
-        These MUST be clarified, NEVER silently inferred.
-
-        Returns True if entity matches an ambiguous alias.
+        Returns True if entity has 2+ resolution candidates.
         """
         if not self.entity_type:
             return False
 
-        entity_lower = self.entity_type.lower().strip()
-
-        if entity_lower in AMBIGUOUS_SEMANTIC_ALIASES:
+        if len(self.entity_resolution_candidates) >= 2:
             logger.debug(
-                f"[INTENT] Ambiguous entity detected: '{entity_lower}' "
-                f"-> maps to {AMBIGUOUS_SEMANTIC_ALIASES[entity_lower]['options']}"
+                f"[INTENT] Ambiguous entity detected: '{self.entity_type}' "
+                f"-> {len(self.entity_resolution_candidates)} candidates: "
+                f"{[c.simple_name for c in self.entity_resolution_candidates]}"
             )
             return True
 
@@ -769,17 +1270,24 @@ class IntentState:
         """
         Get clarification info for an ambiguous entity.
 
-        v6.7: Returns the disambiguation options for the current entity.
+        v6.15: Schema-driven. Builds options dynamically from
+        entity_resolution_candidates instead of static dict.
         """
         if not self.entity_type:
             return None
 
-        entity_lower = self.entity_type.lower().strip()
+        candidates = self.entity_resolution_candidates
+        if len(candidates) < 2:
+            return None
 
-        if entity_lower in AMBIGUOUS_SEMANTIC_ALIASES:
-            return AMBIGUOUS_SEMANTIC_ALIASES[entity_lower]
-
-        return None
+        entity_val = self.entity_type
+        return {
+            "options": [c.simple_name for c in candidates],
+            "question": f"By '{entity_val}', which table do you mean:",
+            "descriptions": {
+                c.simple_name: c.table_name for c in candidates
+            },
+        }
 
     def get_missing_field(self) -> Optional[str]:
         """Get the first missing critical field."""
@@ -824,6 +1332,10 @@ class IntentState:
         self.original_query = None
         self.pending_ambiguity = None
         self.row_select = False  # v6.10: Reset row-select flag
+        self.entity_resolution_candidates = []  # v6.15: Reset entity candidates
+        self.pending_cost_guard = None  # v6.16: Reset cost guard state
+        self.attribute_bindings = []   # v6.22: Reset ALSR attribute bindings
+        self.group_by_targets = []     # v6.22: Reset ALSR group-by targets
 
         # Preserve FK preferences unless explicitly clearing everything
         if not preserve_fk_preferences:
@@ -899,6 +1411,43 @@ class IntentState:
     def get_resolved_fk_preferences(self) -> Dict[str, str]:
         """Get resolved FK preferences for RCL."""
         return self.resolved_fk_preferences.copy()
+
+    # =========================================================================
+    # COST GUARD REFINEMENT (v6.16)
+    # =========================================================================
+
+    def has_pending_cost_guard(self) -> bool:
+        """Check if there's a pending cost guard clarification."""
+        return self.pending_cost_guard is not None
+
+    def set_pending_cost_guard(
+        self,
+        estimated_rows: int,
+        threshold: int,
+        original_sql: str,
+        original_limit: Optional[int] = None,
+    ) -> None:
+        """
+        Set a pending cost guard clarification.
+
+        Called when EXPLAIN estimate exceeds the cost threshold.
+        Stores the validated SQL for direct re-execution (no LLM needed).
+        """
+        self.pending_cost_guard = PendingCostGuard(
+            estimated_rows=estimated_rows,
+            threshold=threshold,
+            original_sql=original_sql,
+            original_limit=original_limit,
+        )
+        logger.info(
+            f"[COST_GUARD] Pending cost guard set: "
+            f"{estimated_rows:,} estimated rows > {threshold:,} threshold, "
+            f"original_limit={original_limit}"
+        )
+
+    def clear_cost_guard(self) -> None:
+        """Clear all cost guard state."""
+        self.pending_cost_guard = None
 
 
 # =============================================================================
@@ -1177,6 +1726,10 @@ class ClarificationReason:
     RELATIONAL_AMBIGUITY = "relational_ambiguity"
     COMPARISON_QUERY = "comparison_query"
     ENTITY_REBINDING = "entity_rebinding"
+    FK_NOT_REACHABLE = "fk_not_reachable"          # v6.14
+    MULTIPLE_FK_PATHS = "multiple_fk_paths"        # v6.14
+    EXPENSIVE_QUERY = "expensive_query"            # v6.16
+    ALSR_BINDING_FK_NOT_REACHABLE = "alsr_binding_fk_not_reachable"  # v6.22
 
 
 @dataclass
@@ -1266,7 +1819,21 @@ def evaluate(accumulated: IntentState) -> IntentDecision:
         )
 
     if accumulated.can_proceed():
-        if accumulated.row_select:
+        # =================================================================
+        # v6.14: FK REACHABILITY GATE
+        # =================================================================
+        # After can_proceed() confirms entity + metric are valid,
+        # verify that any cross-table references are FK-reachable.
+        # This prevents cartesian-product projections while allowing
+        # valid relational projections (e.g., passenger + booking.price).
+        # =================================================================
+        fk_result = _check_fk_projection(accumulated)
+        if not fk_result.allowed:
+            return _make_fk_clarification(accumulated, fk_result)
+
+        if fk_result.reason == "fk_reachable":
+            logger.info("[INTENT] [OK] PROCEED (multi-table projection via FK path)")
+        elif accumulated.row_select:
             logger.info("[INTENT] [OK] PROCEED (row-select: entity known, no aggregation)")
         else:
             logger.info("[INTENT] [OK] PROCEED (entity + metric known)")
@@ -1287,6 +1854,112 @@ def evaluate(accumulated: IntentState) -> IntentDecision:
         clarification=question,
         options=options,
         context=context
+    )
+
+
+def _make_fk_clarification(
+    state: IntentState,
+    fk_result: FKProjectionResult,
+) -> IntentDecision:
+    """
+    Generate clarification for FK reachability failures.
+
+    v6.14: Explains why a cross-table projection was blocked and
+    suggests alternatives from FK-connected tables.
+
+    Args:
+        state: Current intent state
+        fk_result: FKProjectionResult with failure details
+
+    Returns:
+        IntentDecision with proceed=False and structured explanation
+    """
+    entity = state.entity_type or "data"
+    metric = state.metric or "unknown"
+    entity_simple = (
+        fk_result.entity_table.split(".")[-1]
+        if fk_result.entity_table
+        else entity
+    )
+
+    if fk_result.reason == "no_fk_path":
+        unreachable_names = [
+            t.split(".")[-1] for t in fk_result.unreachable_tables
+        ]
+        target_name = unreachable_names[0] if unreachable_names else "unknown"
+        clarification = (
+            f"**Why I'm asking:** `{target_name}` is not directly related to "
+            f"`{entity_simple}` in the database schema.\n\n"
+            f"Could you specify a metric from a table directly related to "
+            f"{entity}?"
+        )
+        context = ClarificationContext(
+            reason=ClarificationReason.FK_NOT_REACHABLE,
+            explanation=(
+                f"No FK path from {entity_simple} to {target_name} "
+                f"within {MAX_FK_HOPS} hops"
+            ),
+            detected_value=metric,
+        )
+    elif fk_result.reason == "multiple_fk_paths":
+        reachable_names = [
+            t.split(".")[-1] for t in fk_result.reachable_tables
+        ]
+        clarification = (
+            f"**Why I'm asking:** '{metric}' exists in multiple related tables: "
+            f"{', '.join(f'`{n}`' for n in reachable_names)}.\n\n"
+            f"Which table's '{metric}' do you mean?"
+        )
+        context = ClarificationContext(
+            reason=ClarificationReason.MULTIPLE_FK_PATHS,
+            explanation=f"Multiple FK-reachable tables contain '{metric}'",
+            detected_value=metric,
+        )
+    else:
+        clarification = f"Could you clarify what metric you'd like for {entity}?"
+        context = ClarificationContext(
+            reason=ClarificationReason.FK_NOT_REACHABLE,
+            explanation="FK projection check failed",
+            detected_value=metric,
+        )
+
+    # Build options
+    options = []
+    if fk_result.reachable_tables:
+        for table in fk_result.reachable_tables:
+            simple = table.split(".")[-1]
+            options.append(f"{simple}.{metric}")
+    else:
+        # Suggest FK-connected tables
+        schema = get_schema_reference()
+        if schema and fk_result.entity_table:
+            fk_targets = _get_fk_targets(fk_result.entity_table, schema)
+            for fk in fk_targets[:4]:
+                target_simple = fk["target_table"].split(".")[-1]
+                options.append(f"Metric from {target_simple}")
+            # Also check reverse FKs
+            for other_table, other_info in schema.get("tables", {}).items():
+                if other_table == fk_result.entity_table:
+                    continue
+                for fk in other_info.get("foreign_keys", []):
+                    if fk.get("target_table") == fk_result.entity_table:
+                        other_simple = other_table.split(".")[-1]
+                        opt = f"Metric from {other_simple}"
+                        if opt not in options:
+                            options.append(opt)
+                        break
+                if len(options) >= 4:
+                    break
+
+    logger.info(
+        f"[INTENT] [X] CLARIFY (FK projection blocked: {fk_result.reason})"
+    )
+
+    return IntentDecision(
+        proceed=False,
+        clarification=clarification,
+        options=options,
+        context=context,
     )
 
 

@@ -292,6 +292,8 @@ try:
         format_ambiguity_clarification,
         # v6.3: Schema-backed clarification prompts
         set_schema_reference,
+        # v6.17: Multi-hop FK graph wiring
+        set_schema_graph_reference,
     )
     INTENT_ACCUMULATION_AVAILABLE = True
 except ImportError:
@@ -332,6 +334,10 @@ try:
         create_complexity_analyzer,
         create_sql_sanitizer,  # v5.0.2: Factory function
         create_column_validator,  # v5.0.2: Column validator factory
+        enforce_query_bounds,  # v6.13: Centralized LIMIT enforcement
+        detect_unbounded_intent,  # v6.13: NL unbounded intent detection
+        rewrite_limit,  # v6.16: Cost guard LIMIT rewrite
+        extract_limit,  # v6.16: Extract LIMIT from SQL
     )
     SQL_VALIDATION_AVAILABLE = True
 except ImportError:
@@ -351,6 +357,17 @@ try:
 except ImportError:
     RELATIONAL_CORRECTION_AVAILABLE = False
     logger.warning("Relational corrector not available - proceeding without it")
+
+# v6.20: Canonical Alias Injection — pre-RCL SQL normalization stage
+try:
+    from sql_normalizer import (
+        CanonicalAliasInjector,
+        create_canonical_alias_injector,
+    )
+    CANONICAL_ALIAS_INJECTION_AVAILABLE = True
+except ImportError:
+    CANONICAL_ALIAS_INJECTION_AVAILABLE = False
+    logger.warning("SQL normalizer not available — canonical alias injection disabled")
 
 try:
     from semantic_role_resolver import (
@@ -388,6 +405,7 @@ async def lifespan(app: FastAPI):
     global context_resolver, result_binder  # v5.0: Context resolution
     global alias_validator, complexity_analyzer, sql_sanitizer  # v5.0: SQL guardrails
     global relational_corrector  # v6.1: FK-based SQL correction
+    global canonical_alias_injector  # v6.20: Pre-RCL normalization
     global query_pipeline  # v5.3.2: Query orchestration pipeline
 
     try:
@@ -398,7 +416,7 @@ async def lifespan(app: FastAPI):
         logger.info("[STARTUP] Logging system active - starting initialization...")
         # === END LOGGING VERIFICATION ===
 
-        logger.info("Initializing OptimaX v5.3 (NL-SQL + Intent Accumulation - Phase 3.5)...")
+        logger.info("Initializing OptimaX v6.22 (ALSR + Metric Completeness Contract + RCL)...")
 
         # Verify API key
         if not GROQ_API_KEY:
@@ -466,12 +484,17 @@ async def lifespan(app: FastAPI):
         # === DJPI Schema Graph (advisory mode - for explainability) ===
         schema_graph = SchemaGraph()
         schema_dict = {}
+        fk_metadata = {}
         for table_name, table_info in db_manager.schema["tables"].items():
             schema_dict[table_name] = [
                 {"name": col["name"], "type": str(col["type"])}
                 for col in table_info["columns"]
             ]
-        schema_graph.build_from_schema(schema_dict)
+            # v6.18: Pass FK metadata for ground-truth edge construction.
+            # Without this, non-identical FK columns (e.g. departure_airport →
+            # airport_code) are invisible to the graph.
+            fk_metadata[table_name] = table_info.get("foreign_keys", [])
+        schema_graph.build_from_schema(schema_dict, fk_metadata=fk_metadata)
         logger.info(f"[OK] DJPI schema graph initialized (ADVISORY mode)")
 
         # === Semantic Mediation (observational) ===
@@ -495,8 +518,11 @@ async def lifespan(app: FastAPI):
             intent_merger = create_intent_merger()
             # v6.3: Set schema reference for schema-backed clarification prompts
             set_schema_reference(db_manager.schema)
+            # v6.17: Wire DJPI graph for multi-hop FK reachability in intent layer
+            set_schema_graph_reference(schema_graph)
             logger.info(f"[OK] Intent Merger initialized (Phase 3.5 multi-turn accumulation)")
             logger.info(f"[OK] Schema reference set for clarification suggestions")
+            logger.info(f"[OK] Schema graph reference set for multi-hop FK intent validation")
         else:
             intent_merger = None
             logger.info("[OK] Intent Accumulation skipped (module not available)")
@@ -534,6 +560,19 @@ async def lifespan(app: FastAPI):
         else:
             relational_corrector = None
             logger.info("[OK] Relational Corrector skipped (module not available)")
+
+        # === Canonical Alias Injection (v6.20 - Pre-RCL normalization) ===
+        # Must be initialised AFTER relational_corrector so we know the schema
+        # is available.  Uses the same schema dict as the relational corrector.
+        if CANONICAL_ALIAS_INJECTION_AVAILABLE:
+            canonical_alias_injector = create_canonical_alias_injector(db_manager.schema)
+            if canonical_alias_injector:
+                logger.info("[OK] Canonical Alias Injector initialized (pre-RCL normalization)")
+            else:
+                logger.info("[OK] Canonical Alias Injector skipped (no schema)")
+        else:
+            canonical_alias_injector = None
+            logger.info("[OK] Canonical Alias Injector skipped (module not available)")
 
         # === System Prompt (behavioral rules only, no schema injection) ===
         final_prompt = SYSTEM_PROMPT_TEMPLATE
@@ -579,19 +618,20 @@ async def lifespan(app: FastAPI):
             intent_extractor=intent_extractor,
             intent_merger=intent_merger,
             execute_fn=execute_nl_sql_query_async,
+            execute_sql_fn=execute_validated_sql_async,  # v6.16: direct SQL execution
             semantic_mediator=semantic_mediator,
             get_last_sql_result_fn=get_last_sql_result,
             set_last_sql_result_fn=set_last_sql_result,
             clear_last_sql_result_fn=clear_last_sql_result,
             classify_viz_intent_fn=classify_visualization_intent,
         )
-        logger.info("[OK] QueryPipeline initialized (v6.1.1 pure orchestration + ambiguity loop)")
+        logger.info("[OK] QueryPipeline initialized (v6.22 pure orchestration + ALSR + metric completeness)")
 
         logger.info("=" * 60)
-        logger.info("OptimaX v6.1.1 (Simplified Architecture + RCL + SRR + Ambiguity Loop) Ready!")
-        logger.info("Architecture: Extract -> Accumulate -> Decide -> Execute -> [Ambiguity -> Clarify -> Resolve]")
+        logger.info("OptimaX v6.22 (ALSR + Metric Completeness + RCL + SRR + Ambiguity Loop) Ready!")
+        logger.info("Architecture: Extract -> ALSR -> Accumulate -> Decide -> Execute -> [Ambiguity -> Clarify -> Resolve]")
         logger.info("Clarification Authority: intent_accumulator.py ONLY (+ RCL ambiguity)")
-        logger.info("Decision Rule: entity AND metric known -> proceed")
+        logger.info("Decision Rule: entity AND metric known -> proceed (COUNT always complete)")
         logger.info(f"Database: {len(db_manager.schema['tables'])} tables detected")
         if relational_corrector:
             fk_count = len(relational_corrector.schema.foreign_keys)
@@ -614,8 +654,8 @@ async def lifespan(app: FastAPI):
 # Initialize FastAPI with lifespan
 app = FastAPI(
     title="OptimaX SQL Chat API",
-    description="v5.3 Phase 3.5: Intent Accumulation + Multi-turn Semantic Convergence for NL-SQL queries",
-    version="5.3",
+    description="v6.22: ALSR + Metric Completeness Contract + Multi-turn NL-SQL with RCL + SRR",
+    version="6.22",
     lifespan=lifespan,
 )
 
@@ -651,6 +691,7 @@ alias_validator = None    # SQLAliasValidator (v5.0 - alias reference validation
 complexity_analyzer = None  # QueryComplexityAnalyzer (v5.0 - query safety checks)
 sql_sanitizer = None      # SQLOutputSanitizer (v5.0.2 - strict SQL output contract)
 relational_corrector = None  # RelationalCorrector (v6.1 - FK-based SQL correction)
+canonical_alias_injector = None  # CanonicalAliasInjector (v6.20 - pre-RCL normalization)
 
 # NL-SQL Engine Components (v5.0 - Primary SQL execution path)
 sql_database = None    # LlamaIndex SQLDatabase (SQLAlchemy wrapper)
@@ -876,6 +917,31 @@ def execute_nl_sql_query(
             "available_tables": available,
         }
 
+    # =========================================================================
+    # v6.20: CANONICAL ALIAS INJECTION — pre-RCL SQL normalization
+    # =========================================================================
+    # Pipeline position: AFTER sanitization + schema normalization,
+    #                    BEFORE the Relational Corrector.
+    #
+    # Purpose: Ensure every table in FROM/JOIN has a deterministic canonical
+    # alias and that all table_name.column references are rewritten to
+    # alias.column BEFORE RCL adds new JOINs.
+    #
+    # Without this stage, RCL can produce SQL where:
+    #   - Pre-existing ON conditions use bare table names:
+    #       ON booking_leg.flight_id = flight.flight_id
+    #   - Newly-added aliases make those names "undefined":
+    #       FROM booking_leg b JOIN flight f1 ON b.flight_id = f1.flight_id
+    # The alias validator correctly rejects the resulting inconsistent SQL.
+    #
+    # This stage guarantees that all references are consistent BEFORE RCL
+    # touches the SQL, so RCL's rewrite — if triggered — operates on
+    # already-normalized input and cannot introduce alias inconsistencies.
+    # =========================================================================
+    if CANONICAL_ALIAS_INJECTION_AVAILABLE and canonical_alias_injector:
+        sql_query = canonical_alias_injector.normalize(sql_query)
+        logger.info(f"[STRICT] Canonical alias injection: {sql_query[:120]}...")
+
     # Relational Correctness Layer (FK-based SQL correction)
     if RELATIONAL_CORRECTION_AVAILABLE and relational_corrector:
         # Check if we have resolved FK preferences from prior clarification
@@ -995,6 +1061,28 @@ def execute_nl_sql_query(
 
         logger.debug(f"[STRICT] Alias validation passed: {alias_result.declared_aliases}")
 
+    # =====================================================================
+    # v6.13: QUERY BOUNDING — centralized LIMIT enforcement
+    # =====================================================================
+    # Enforces LIMIT BEFORE complexity analysis so the analyzer always
+    # sees bounded SQL. Injects LIMIT if missing, caps if too high.
+    # This is the SINGLE canonical enforcement point in the pipeline.
+    # =====================================================================
+    if SQL_VALIDATION_AVAILABLE:
+        bound_result = enforce_query_bounds(sql_query, row_limit)
+        if bound_result.limit_applied:
+            logger.info(
+                f"[BOUNDING] Pipeline LIMIT enforced: "
+                f"limit={bound_result.enforced_limit}, "
+                f"capped={bound_result.was_capped}, "
+                f"original={bound_result.original_limit}"
+            )
+        else:
+            logger.debug(
+                f"[BOUNDING] No change needed — existing LIMIT {bound_result.enforced_limit} within bounds"
+            )
+        sql_query = bound_result.sql
+
     # Complexity check (block overly complex queries)
     # v6.9: BUG 2 FIX - Analyzer now accepts row_limit to know LIMIT will be enforced
     if SQL_VALIDATION_AVAILABLE and complexity_analyzer:
@@ -1077,21 +1165,35 @@ def execute_nl_sql_query(
                 "available_tables": None,
             }
         else:
-            # Database returned an error - pass it through RAW
+            # =====================================================================
+            # v6.16: PRESERVE original error_type from execution layer
+            # =====================================================================
+            # BUG FIX: Previously overwrote all error_types to "database_error",
+            # losing structured error types like "cost_guard". This prevented
+            # the pipeline from detecting cost guard results for clarification.
+            # =====================================================================
             db_error = result.get("error", "Unknown database error")
-            logger.warning(f"[STRICT] Database error: {db_error}")
+            original_error_type = result.get("error_type", "database_error")
+            logger.warning(f"[STRICT] Database error ({original_error_type}): {db_error}")
             available = db_manager.get_table_names_without_schema() if db_manager else None
 
-            return {
+            error_result = {
                 "success": False,
-                "sql": sql_query,
+                "sql": result.get("sql", sql_query),
                 "data": None,
                 "columns": None,
                 "row_count": 0,
                 "error": db_error,
-                "error_type": "database_error",
+                "error_type": original_error_type,
                 "available_tables": available,
             }
+
+            # Preserve cost guard metadata for upstream clarification flow
+            if original_error_type == "cost_guard":
+                error_result["estimated_rows"] = result.get("estimated_rows")
+                error_result["threshold"] = result.get("threshold")
+
+            return error_result
 
     except Exception as e:
         logger.error(f"[STRICT] Database exception: {str(e)}")
@@ -1125,7 +1227,10 @@ async def execute_nl_sql_query_async(
     """
     try:
         result = await asyncio.wait_for(
-            asyncio.to_thread(execute_nl_sql_query, user_query, row_limit, intent_state, route_filters),
+            asyncio.to_thread(
+                execute_nl_sql_query, user_query, row_limit,
+                intent_state, route_filters
+            ),
             timeout=timeout
         )
         return result
@@ -1146,6 +1251,136 @@ async def execute_nl_sql_query_async(
             ),
             "error_type": "timeout",
             "available_tables": None,
+        }
+
+
+def execute_validated_sql(sql: str, row_limit: int = 50) -> Dict[str, Any]:
+    """
+    Execute pre-validated SQL directly against the database.
+
+    v6.16: Used by the cost guard refinement path. The SQL has already been
+    through the full validation pipeline (sanitizer, RCL, column validation,
+    alias validation, complexity analysis). Only LIMIT enforcement and
+    SELECT-only safety checks are re-applied.
+
+    NO LLM call. NO NL-SQL generation. NO intent extraction.
+
+    Args:
+        sql: Validated SQL (from PendingCostGuard.original_sql with LIMIT rewritten)
+        row_limit: Maximum rows (for LIMIT enforcement safety net)
+
+    Returns:
+        Structured result dict (same format as execute_nl_sql_query)
+    """
+    global db_manager
+
+    if not db_manager:
+        return {
+            "success": False,
+            "sql": sql,
+            "data": None,
+            "columns": None,
+            "row_count": 0,
+            "error": "Database manager not initialized",
+            "error_type": "system_error",
+        }
+
+    logger.info(f"[DIRECT] Executing validated SQL: {sql[:100]}...")
+
+    # LIMIT enforcement (safety net — rewrite_limit should have set it,
+    # but enforce_query_bounds caps if somehow too high)
+    if SQL_VALIDATION_AVAILABLE:
+        bound_result = enforce_query_bounds(sql, row_limit)
+        sql = bound_result.sql
+        if bound_result.limit_applied:
+            logger.info(
+                f"[DIRECT] Safety-net LIMIT enforced: "
+                f"limit={bound_result.enforced_limit}, capped={bound_result.was_capped}"
+            )
+
+    # SELECT-only safety check (always runs)
+    is_valid, validated_sql = db_manager._validate_sql(sql, row_limit)
+    if not is_valid:
+        return {
+            "success": False,
+            "sql": sql,
+            "data": None,
+            "columns": None,
+            "row_count": 0,
+            "error": f"Safety validation failed: {validated_sql}",
+            "error_type": "validation_failed",
+        }
+    sql = validated_sql
+
+    # Execute — skip cost guard (user already approved via numeric LIMIT)
+    try:
+        result = db_manager.execute_query(sql, row_limit, skip_cost_guard=True)
+
+        if result.get("success"):
+            data = result.get("data", [])
+            columns = result.get("columns", [])
+            logger.info(f"[DIRECT] Query successful: {len(data)} rows returned")
+            return {
+                "success": True,
+                "sql": sql,
+                "data": data,
+                "columns": columns,
+                "row_count": len(data),
+                "error": None,
+                "error_type": None,
+            }
+        else:
+            db_error = result.get("error", "Unknown database error")
+            logger.warning(f"[DIRECT] Database error: {db_error}")
+            return {
+                "success": False,
+                "sql": result.get("sql", sql),
+                "data": None,
+                "columns": None,
+                "row_count": 0,
+                "error": db_error,
+                "error_type": result.get("error_type", "database_error"),
+            }
+
+    except Exception as e:
+        logger.error(f"[DIRECT] Database exception: {str(e)}")
+        return {
+            "success": False,
+            "sql": sql,
+            "data": None,
+            "columns": None,
+            "row_count": 0,
+            "error": f"Database execution failed: {str(e)}",
+            "error_type": "database_exception",
+        }
+
+
+async def execute_validated_sql_async(
+    sql: str,
+    row_limit: int = 50,
+    timeout: float = 45.0,
+) -> Dict[str, Any]:
+    """
+    Async wrapper for execute_validated_sql with timeout.
+
+    v6.16: Used by QueryPipeline cost guard refinement path.
+    """
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(execute_validated_sql, sql, row_limit),
+            timeout=timeout,
+        )
+        return result
+    except asyncio.TimeoutError:
+        logger.warning(f"[DIRECT] Query timeout after {timeout}s")
+        return {
+            "success": False,
+            "sql": sql,
+            "data": None,
+            "columns": None,
+            "row_count": 0,
+            "error": f"Query timed out after {timeout} seconds.",
+            "error_type": "timeout",
         }
 
 
@@ -1207,8 +1442,8 @@ def get_or_create_session(session_id: str, custom_prompt: Optional[str] = None) 
 @app.get("/")
 async def root():
     return {
-        "message": "OptimaX SQL Chat API v5.3",
-        "version": "5.3",
+        "message": "OptimaX SQL Chat API v6.22",
+        "version": "6.22",
         "architecture": "Intent Extraction -> Intent Accumulation -> Context Resolution -> Semantic Mediation -> NL-SQL -> Guardrails -> Database",
         "features": [
             "Intent Accumulation (v5.3 Phase 3.5 - multi-turn semantic convergence)",
@@ -1243,7 +1478,7 @@ async def health_check():
 
     health_status = {
         "status": "healthy",
-        "version": "6.1",
+        "version": "6.22",
         "checks": {},
     }
 
@@ -1808,6 +2043,7 @@ async def connect_to_database(request: DatabaseConnectionRequest):
     global agent, db_manager, llm, sessions, custom_prompt_config, DATABASE_URL
     global sql_database, nl_sql_engine, schema_graph  # v5.0: NL-SQL components
     global relational_corrector  # v6.1: FK-based SQL correction
+    global canonical_alias_injector  # v6.20: Pre-RCL normalization
 
     try:
         logger.info(f"Attempting to connect to new database...")
@@ -1883,13 +2119,21 @@ async def connect_to_database(request: DatabaseConnectionRequest):
         # ====================================================================
         schema_graph = SchemaGraph()
         schema_dict = {}
+        fk_metadata = {}
         for table_name, table_info in db_manager.schema["tables"].items():
             schema_dict[table_name] = [
                 {"name": col["name"], "type": str(col["type"])}
                 for col in table_info["columns"]
             ]
-        schema_graph.build_from_schema(schema_dict)
+            # v6.18: FK metadata for ground-truth edge construction (reconnect path)
+            fk_metadata[table_name] = table_info.get("foreign_keys", [])
+        schema_graph.build_from_schema(schema_dict, fk_metadata=fk_metadata)
         logger.info(f"[OK] DJPI schema graph reinitialized (advisory mode)")
+        # v6.17: Re-wire graph reference after reconnect
+        if INTENT_ACCUMULATION_AVAILABLE:
+            set_schema_reference(db_manager.schema)
+            set_schema_graph_reference(schema_graph)
+            logger.info(f"[OK] Schema + graph references refreshed for reconnected database")
 
         # ====================================================================
         # RELATIONAL CORRECTOR REINITIALIZATION (v6.1)
@@ -1903,6 +2147,18 @@ async def connect_to_database(request: DatabaseConnectionRequest):
                 logger.info("[OK] Relational Corrector skipped (no schema)")
         else:
             relational_corrector = None
+
+        # ====================================================================
+        # CANONICAL ALIAS INJECTOR REINITIALIZATION (v6.20)
+        # ====================================================================
+        if CANONICAL_ALIAS_INJECTION_AVAILABLE:
+            canonical_alias_injector = create_canonical_alias_injector(db_manager.schema)
+            if canonical_alias_injector:
+                logger.info("[OK] Canonical Alias Injector reinitialized (pre-RCL normalization)")
+            else:
+                logger.info("[OK] Canonical Alias Injector skipped (no schema)")
+        else:
+            canonical_alias_injector = None
 
         # v5.0: No schema injection into prompts
         final_prompt = SYSTEM_PROMPT_TEMPLATE

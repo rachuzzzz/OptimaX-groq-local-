@@ -164,7 +164,7 @@ QUERY: "{user_query}"
 
 Return this JSON structure:
 {{
-    "entity_type": "main entity (airport, customer, flight, route, booking, etc.) or 'unknown'",
+    "entity_type": "main entity mentioned in the query (use the exact term the user used) or 'unknown'",
     "metric": "measurement type (count, sum, average, list, total, etc.) or 'unknown'",
     "event": "event type (arrivals, departures, bookings, etc.) or null",
     "time_scope": "all_time, last_year, last_month, last_week, or 'unknown'",

@@ -1416,6 +1416,7 @@ class LimitEnforcementResult:
     original_limit: Optional[int]
     enforced_limit: int
     was_unbounded_list: bool = False
+    was_capped: bool = False  # True when existing LIMIT was reduced
 
 
 class SQLLimitEnforcer:
@@ -1553,19 +1554,21 @@ class SQLLimitEnforcer:
             was_unbounded_list=True
         )
 
-    def enforce_limit(self, sql: str) -> LimitEnforcementResult:
+    def enforce_limit(self, sql: str, max_limit: Optional[int] = None) -> LimitEnforcementResult:
         """
-        Enforce LIMIT on SQL query.
+        Enforce LIMIT on SQL query. Canonical LIMIT enforcement method.
 
         Rules:
-        - If query has GROUP BY: enforce LIMIT 100
-        - Otherwise: enforce LIMIT 50
-        - If LIMIT exists: do not override
-
-        v6.9.1: Also detects and flags unbounded list queries.
+        - If query has GROUP BY and no max_limit override: enforce LIMIT 100
+        - Otherwise: enforce LIMIT 50 (or max_limit if provided)
+        - If LIMIT exists and exceeds max_limit: cap it down
+        - If LIMIT exists and within max_limit: leave unchanged
+        - Idempotent: calling twice produces same result
 
         Args:
             sql: SQL query string
+            max_limit: Maximum allowed LIMIT value. If provided, existing LIMITs
+                       exceeding this will be capped down.
 
         Returns:
             LimitEnforcementResult with enforced SQL
@@ -1586,15 +1589,39 @@ class SQLLimitEnforcer:
 
         # Determine appropriate limit based on query type
         has_group_by = bool(self.GROUP_BY_PATTERN.search(sql))
-        target_limit = self.GROUP_BY_LIMIT if has_group_by else self.DEFAULT_LIMIT
+        if max_limit is not None:
+            target_limit = max_limit
+        else:
+            target_limit = self.GROUP_BY_LIMIT if has_group_by else self.DEFAULT_LIMIT
 
         # Check for existing LIMIT
         limit_match = self.LIMIT_PATTERN.search(sql)
 
         if limit_match:
             original_limit = int(limit_match.group(1))
+
+            if original_limit > target_limit:
+                # Cap the existing LIMIT down
+                capped_sql = re.sub(
+                    r'\bLIMIT\s+\d+',
+                    f'LIMIT {target_limit}',
+                    sql,
+                    flags=re.IGNORECASE,
+                )
+                logger.info(
+                    f"[BOUNDING] Capped LIMIT {original_limit} → {target_limit}"
+                )
+                return LimitEnforcementResult(
+                    sql=capped_sql,
+                    limit_applied=True,
+                    original_limit=original_limit,
+                    enforced_limit=target_limit,
+                    was_unbounded_list=False,
+                    was_capped=True,
+                )
+
             logger.debug(
-                f"[LIMIT_ENFORCER] Existing LIMIT {original_limit} found - not overriding"
+                f"[BOUNDING] Existing LIMIT {original_limit} within bounds — no change"
             )
             return LimitEnforcementResult(
                 sql=sql,
@@ -1604,20 +1631,15 @@ class SQLLimitEnforcer:
                 was_unbounded_list=False
             )
 
-        # No LIMIT - inject one
-        # Remove trailing semicolon if present, add LIMIT, re-add semicolon
+        # No LIMIT — inject one
+        # Remove trailing semicolon if present, add LIMIT
         sql_clean = sql.rstrip(';').strip()
         enforced_sql = f"{sql_clean} LIMIT {target_limit}"
 
-        if is_unbounded_list:
-            logger.info(
-                f"[LIMIT_ENFORCER] Bounded unbounded list query with LIMIT {target_limit}"
-            )
-        else:
-            logger.info(
-                f"[LIMIT_ENFORCER] Injected LIMIT {target_limit} "
-                f"({'GROUP BY detected' if has_group_by else 'default limit'})"
-            )
+        logger.info(
+            f"[BOUNDING] Injected LIMIT {target_limit} "
+            f"({'GROUP BY' if has_group_by else 'unbounded list' if is_unbounded_list else 'default'})"
+        )
 
         return LimitEnforcementResult(
             sql=enforced_sql,
@@ -1632,6 +1654,60 @@ def enforce_sql_limit(sql: str) -> LimitEnforcementResult:
     """Convenience function to enforce SQL LIMIT."""
     enforcer = SQLLimitEnforcer()
     return enforcer.enforce_limit(sql)
+
+
+def enforce_query_bounds(sql: str, row_limit: int = 50) -> LimitEnforcementResult:
+    """
+    Canonical entry point for all LIMIT enforcement. Idempotent.
+
+    This is the SINGLE function the pipeline should call for LIMIT bounding.
+    It injects LIMIT if missing, and caps existing LIMIT if too high.
+
+    Args:
+        sql: SQL query string
+        row_limit: Maximum allowed rows (default 50)
+
+    Returns:
+        LimitEnforcementResult with bounded SQL
+    """
+    enforcer = SQLLimitEnforcer()
+    return enforcer.enforce_limit(sql, max_limit=row_limit)
+
+
+def detect_unbounded_intent(nl_query: str) -> bool:
+    """
+    Pattern-match NL queries for unbounded intent.
+
+    Detects phrases like "all", "every", "no limit", "entire", "everything",
+    "complete list", etc. Advisory only — cost guard remains active regardless.
+
+    Args:
+        nl_query: Natural language query from user
+
+    Returns:
+        True if user appears to want unbounded results
+    """
+    if not nl_query:
+        return False
+    patterns = [
+        r'\ball\b',
+        r'\bevery\b',
+        r'\bno limit\b',
+        r'\bentire\b',
+        r'\beverything\b',
+        r'\bcomplete list\b',
+        r'\bfull list\b',
+        r'\blist all\b',
+        r'\bshow all\b',
+        r'\bget all\b',
+        r'\bfetch all\b',
+        r'\bwithout limit\b',
+    ]
+    nl_lower = nl_query.lower()
+    for pattern in patterns:
+        if re.search(pattern, nl_lower):
+            return True
+    return False
 
 
 def bound_unbounded_list_query(sql: str, limit: Optional[int] = None) -> LimitEnforcementResult:
@@ -1675,6 +1751,83 @@ def is_unbounded_list_query(sql: str) -> bool:
 def create_limit_enforcer() -> SQLLimitEnforcer:
     """Factory function to create a LIMIT enforcer."""
     return SQLLimitEnforcer()
+
+
+# =============================================================================
+# LIMIT REWRITER (v6.16 - Cost Guard Numeric Refinement)
+# =============================================================================
+# Deterministic LIMIT rewrite for cost guard refinement path.
+# Takes validated SQL and a new LIMIT value, returns SQL with exactly
+# that LIMIT. Preserves ORDER BY, handles semicolons, idempotent.
+#
+# This is NOT the same as enforce_query_bounds (which caps/injects).
+# This is a targeted rewrite for user-specified row counts.
+# =============================================================================
+
+# Shared pattern: matches LIMIT <digits> optionally followed by OFFSET <digits>
+_LIMIT_CLAUSE_PATTERN = re.compile(
+    r'\bLIMIT\s+\d+(?:\s+OFFSET\s+\d+)?',
+    re.IGNORECASE,
+)
+
+
+def rewrite_limit(sql: str, new_limit: int) -> str:
+    """
+    Rewrite the LIMIT clause of a validated SQL query.
+
+    Rules:
+        1. If LIMIT exists: replace it with new value (preserve OFFSET if present)
+        2. If no LIMIT: append LIMIT before semicolon / at end
+        3. Preserve ORDER BY
+        4. Handle trailing semicolons
+        5. Deterministic — same input always produces same output
+
+    Args:
+        sql: Validated SQL query (already passed safety checks)
+        new_limit: New LIMIT value (must be > 0)
+
+    Returns:
+        SQL with exactly LIMIT <new_limit>
+
+    Raises:
+        ValueError: If new_limit is not a positive integer
+    """
+    if not isinstance(new_limit, int) or new_limit <= 0:
+        raise ValueError(f"new_limit must be a positive integer, got {new_limit}")
+
+    if not sql or not sql.strip():
+        raise ValueError("sql must be a non-empty string")
+
+    sql = sql.strip()
+
+    # Check for existing LIMIT clause
+    match = _LIMIT_CLAUSE_PATTERN.search(sql)
+
+    if match:
+        # Replace existing LIMIT (drop any OFFSET — cost guard path is fresh)
+        rewritten = _LIMIT_CLAUSE_PATTERN.sub(f'LIMIT {new_limit}', sql)
+    else:
+        # No LIMIT — inject before trailing semicolon or at end
+        if sql.endswith(';'):
+            rewritten = sql[:-1].rstrip() + f' LIMIT {new_limit};'
+        else:
+            rewritten = sql.rstrip() + f' LIMIT {new_limit}'
+
+    return rewritten
+
+
+def extract_limit(sql: str) -> Optional[int]:
+    """
+    Extract the LIMIT value from a SQL query.
+
+    Returns None if no LIMIT clause is present.
+    """
+    if not sql:
+        return None
+    match = re.search(r'\bLIMIT\s+(\d+)', sql, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    return None
 
 
 # =============================================================================

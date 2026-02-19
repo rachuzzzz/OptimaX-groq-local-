@@ -21,6 +21,7 @@ from intent_accumulator import (
     format_ambiguity_clarification,
 )
 from context_resolver import apply_semantic_context_binding
+from sql_validator import rewrite_limit, extract_limit
 from sgrd import (
     disclose_greeting,
     disclose_visualization,
@@ -28,6 +29,7 @@ from sgrd import (
     disclose_for_clarification,
     disclose_for_pending_ambiguity,
     disclose_for_cost_guard,
+    disclose_for_cost_limit_rewrite,
     disclose_execution_success,
     disclose_execution_failure,
 )
@@ -75,12 +77,16 @@ class QueryPipeline:
     The accumulator is the SOLE authority for clarify/proceed.
     """
 
+    # v6.16: Maximum user-specified LIMIT for cost guard refinement
+    MAX_COST_GUARD_LIMIT = 1000
+
     def __init__(
         self,
         llm: Any,
         intent_extractor: Any,
         intent_merger: Any,
         execute_fn: Any,
+        execute_sql_fn: Any = None,
         semantic_mediator: Any = None,
         get_last_sql_result_fn: Any = None,
         set_last_sql_result_fn: Any = None,
@@ -91,6 +97,7 @@ class QueryPipeline:
         self.extractor = intent_extractor
         self.merger = intent_merger
         self.execute = execute_fn
+        self.execute_sql = execute_sql_fn  # v6.16: Direct SQL execution (no LLM)
         self.observer = semantic_mediator
         self.get_last_sql_result = get_last_sql_result_fn
         self.set_last_sql_result = set_last_sql_result_fn
@@ -219,6 +226,106 @@ class QueryPipeline:
                             reasoning_disclosure=disclose_for_pending_ambiguity(pending),
                         )
 
+            # =================================================================
+            # STEP 0B: CHECK FOR PENDING COST GUARD (v6.16)
+            # =================================================================
+            # If the previous query was blocked by the cost guard, check if
+            # the user's response is a numeric LIMIT or a new query.
+            #
+            # FLOW:
+            # 1. Check if accumulated has pending cost guard
+            # 2. Parse user response as integer
+            # 3. If valid integer (1..MAX_COST_GUARD_LIMIT):
+            #    a. Rewrite LIMIT on stored SQL (no LLM call)
+            #    b. Execute directly via execute_sql_fn
+            #    c. Clear cost guard state
+            # 4. If new query pattern -> clear cost guard, fall through
+            # 5. If invalid -> re-ask for numeric input
+            #
+            # CRITICAL: This path executes STORED SQL with a rewritten LIMIT.
+            # No LLM call. No NL-SQL generation. No intent extraction.
+            # =================================================================
+            if accumulated and accumulated.has_pending_cost_guard():
+                pending_cg = accumulated.pending_cost_guard
+                logger.info(
+                    f"[PIPELINE] Pending cost guard detected: "
+                    f"{pending_cg.estimated_rows:,} rows > {pending_cg.threshold:,}"
+                )
+
+                parsed_limit = self._parse_numeric_limit(query)
+
+                if parsed_limit is not None:
+                    # Validate range
+                    if parsed_limit < 1 or parsed_limit > self.MAX_COST_GUARD_LIMIT:
+                        logger.info(
+                            f"[PIPELINE] Numeric limit out of range: {parsed_limit} "
+                            f"(valid: 1-{self.MAX_COST_GUARD_LIMIT})"
+                        )
+                        return PipelineResult(
+                            success=True,
+                            response=(
+                                f"Please enter a number between 1 and "
+                                f"{self.MAX_COST_GUARD_LIMIT:,}."
+                            ),
+                            session_id=session_id,
+                            execution_time=self._elapsed(start),
+                            clarification_needed=True,
+                            reasoning_disclosure=disclose_for_cost_guard({
+                                "estimated_rows": pending_cg.estimated_rows,
+                                "error_type": "cost_guard",
+                            }),
+                        )
+
+                    # Rewrite LIMIT on stored SQL
+                    rewritten_sql = rewrite_limit(
+                        pending_cg.original_sql, parsed_limit
+                    )
+                    logger.info(
+                        f"[PIPELINE] Cost guard resolved: LIMIT {parsed_limit} "
+                        f"(was {pending_cg.original_limit})"
+                    )
+
+                    # Clear cost guard BEFORE execution
+                    accumulated.clear_cost_guard()
+                    session["accumulated_intent"] = accumulated
+
+                    # Execute directly — no LLM, no NL-SQL
+                    result = await self.execute_sql(
+                        sql=rewritten_sql,
+                        row_limit=parsed_limit,
+                        timeout=45.0,
+                    )
+
+                    disclosure = disclose_for_cost_limit_rewrite(
+                        pending_cg.estimated_rows, parsed_limit
+                    )
+                    return self._handle_execution_result(
+                        result, accumulated, session_id, start,
+                        context_disclosure=disclosure,
+                    )
+
+                elif self._is_new_query_pattern(query):
+                    # User provided a new/refined query — clear cost guard, process normally
+                    logger.info("[PIPELINE] New query detected — clearing cost guard")
+                    accumulated.clear_cost_guard()
+                    session["accumulated_intent"] = accumulated
+                    # Fall through to normal extraction
+
+                else:
+                    # Response is not numeric and not a new query — re-ask
+                    logger.info("[PIPELINE] Cost guard response not numeric — re-asking")
+                    return PipelineResult(
+                        success=True,
+                        response=self._format_cost_guard_numeric_prompt(pending_cg),
+                        session_id=session_id,
+                        execution_time=self._elapsed(start),
+                        clarification_needed=True,
+                        reasoning_disclosure=disclose_for_cost_guard({
+                            "estimated_rows": pending_cg.estimated_rows,
+                            "error_type": "cost_guard",
+                        }),
+                    )
+
             # Extract intent (one-shot, no decisions)
             extraction = self.extractor.extract(query)
 
@@ -228,10 +335,226 @@ class QueryPipeline:
                     f"metric={extraction.intent.metric}"
                 )
 
+                # =============================================================
+                # ALSR PHASE 1 — entity_type composite phrase decomposition (v6.22)
+                # =============================================================
+                # When entity_type is a composite phrase (e.g., "aircraft model"),
+                # ALSR splits it into entity part ("aircraft") and attribute part
+                # ("model"), resolves each against the live schema, and rewrites
+                # entity_type to the canonical entity table name ("aircraft_type").
+                # The attribute binding is stored for group_by_targets injection
+                # AFTER merge (merge may call clear() which would wipe it).
+                #
+                # Guard: only runs on multi-token entity_type strings.
+                # Passthrough: if the full phrase is a table, ALSR skips it
+                #              and entity_resolver handles it below.
+                # =============================================================
+                _alsr_entity_binding = None
+                if (
+                    extraction.intent.entity_type
+                    and " " in extraction.intent.entity_type
+                    and extraction.intent.entity_type != "unknown"
+                ):
+                    try:
+                        from semantic_attribute_resolver import resolve_attribute_phrase
+                        from intent_accumulator import get_schema_reference as _get_schema
+                        _alsr_schema = _get_schema()
+                        if _alsr_schema:
+                            _alsr_result = resolve_attribute_phrase(
+                                extraction.intent.entity_type, _alsr_schema
+                            )
+                            if _alsr_result.status == "resolved" and _alsr_result.entity_override:
+                                logger.info(
+                                    f"[PIPELINE] ALSR entity decompose: "
+                                    f"'{extraction.intent.entity_type}' → "
+                                    f"entity='{_alsr_result.entity_override}', "
+                                    f"attr='{_alsr_result.binding.qualified}'"
+                                )
+                                extraction.intent.entity_type = _alsr_result.entity_override
+                                _alsr_entity_binding = _alsr_result.binding
+                            elif _alsr_result.status == "ambiguous":
+                                logger.info(
+                                    f"[PIPELINE] ALSR entity ambiguous: "
+                                    f"'{extraction.intent.entity_type}' → "
+                                    f"{[b.qualified for b in _alsr_result.candidates]}"
+                                )
+                                # Leave entity_type as-is; entity_resolver handles ambiguity below
+                            else:
+                                logger.debug(
+                                    f"[PIPELINE] ALSR entity {_alsr_result.status}: "
+                                    f"'{extraction.intent.entity_type}' ({_alsr_result.reason})"
+                                )
+                    except ImportError:
+                        logger.debug("[PIPELINE] ALSR not available (semantic_attribute_resolver not installed)")
+
+                # =============================================================
+                # ENTITY RESOLUTION — schema-driven (v6.15)
+                # =============================================================
+                # Resolve free-form entity names (e.g., "customer", "flights")
+                # to actual schema table names BEFORE merge. This replaces
+                # hardcoded AMBIGUOUS_SEMANTIC_ALIASES with live schema matching.
+                # =============================================================
+                if extraction.intent.entity_type and extraction.intent.entity_type != "unknown":
+                    from entity_resolver import resolve_entity
+                    from intent_accumulator import get_schema_reference
+
+                    schema = get_schema_reference()
+                    if schema:
+                        resolution = resolve_entity(
+                            extraction.intent.entity_type,
+                            schema,
+                        )
+                        if resolution.status == "resolved":
+                            logger.info(
+                                f"[PIPELINE] Entity resolved: "
+                                f"'{extraction.intent.entity_type}' → "
+                                f"'{resolution.canonical_entity}'"
+                            )
+                            extraction.intent.entity_type = resolution.canonical_entity
+                        elif resolution.status == "ambiguous":
+                            logger.info(
+                                f"[PIPELINE] Entity ambiguous: "
+                                f"'{extraction.intent.entity_type}' → "
+                                f"{[c.simple_name for c in resolution.candidates]}"
+                            )
+                            # Store candidates on accumulated state for clarification
+                            if accumulated:
+                                accumulated.entity_resolution_candidates = resolution.candidates
+                                session["accumulated_intent"] = accumulated
+                        # "unresolved" → leave entity_type as-is, let accumulator handle
+
+                # =============================================================
+                # ALSR PHASE 2 — metric / event attribute binding (v6.22)
+                # =============================================================
+                # When metric or event contain composite phrases (e.g., "booking
+                # price"), ALSR resolves them to qualified column references
+                # (e.g., "booking.price"). The original phrase is preserved for
+                # the LLM (it still needs to determine the aggregation type).
+                # Bindings are applied to accumulated state AFTER merge to avoid
+                # being wiped by IntentMerger.merge() → accumulated.clear().
+                # =============================================================
+                _alsr_metric_binding = None
+                _alsr_event_binding = None
+                try:
+                    from semantic_attribute_resolver import resolve_attribute_phrase as _alsr_resolve
+                    from intent_accumulator import get_schema_reference as _get_schema2
+                    _alsr_schema2 = _get_schema2()
+                    if _alsr_schema2:
+                        if (
+                            extraction.intent.metric
+                            and " " in extraction.intent.metric
+                            and extraction.intent.metric != "unknown"
+                        ):
+                            _m_result = _alsr_resolve(extraction.intent.metric, _alsr_schema2)
+                            if _m_result.status == "resolved":
+                                _alsr_metric_binding = _m_result.binding
+                                logger.info(
+                                    f"[PIPELINE] ALSR metric binding: "
+                                    f"'{extraction.intent.metric}' → "
+                                    f"'{_m_result.binding.qualified}'"
+                                )
+                        if (
+                            extraction.intent.event
+                            and " " in extraction.intent.event
+                            and extraction.intent.event not in ("unknown", "none", "")
+                        ):
+                            _e_result = _alsr_resolve(extraction.intent.event, _alsr_schema2)
+                            if _e_result.status == "resolved":
+                                _alsr_event_binding = _e_result.binding
+                                logger.info(
+                                    f"[PIPELINE] ALSR event binding: "
+                                    f"'{extraction.intent.event}' → "
+                                    f"'{_e_result.binding.qualified}'"
+                                )
+                except ImportError:
+                    pass  # ALSR not available; Phase 1 guard already logged this
+
+                # =============================================================
+                # ALSR PHASE 3 — tail-position grouping phrase (v6.22+)
+                # =============================================================
+                # Detect structural grouping patterns (per / grouped by /
+                # group by / by) in the original NL query and route the
+                # extracted phrase through ALSR for schema-grounded resolution.
+                #
+                # This captures dimensions like "per aircraft model" that appear
+                # in tail position and are syntactically distinct from the
+                # entity_type / metric / event fields the LLM extractor saw.
+                # ALSR Phase 1 and Phase 2 do not fire for these phrases because
+                # entity_type = "flights" (no whitespace) and metric / event
+                # do not contain the grouping phrase.
+                #
+                # Guard: detection is deterministic (no LLM calls); ALSR
+                # resolution is schema-driven (no heuristic guessing).
+                # No decision logic is modified. has_metric() evaluates the
+                # populated group_by_targets under the existing completeness
+                # contract — this is purely an extraction-layer extension.
+                # =============================================================
+                _alsr_grouping_binding = None
+                try:
+                    from grouping_phrase_detector import extract_grouping_phrase
+                    _grouping_phrase = extract_grouping_phrase(query)
+                    if _grouping_phrase:
+                        logger.info(
+                            f"[GROUPING] Detected grouping phrase: '{_grouping_phrase}'"
+                        )
+                        from semantic_attribute_resolver import (
+                            resolve_attribute_phrase as _alsr_resolve_grp,
+                        )
+                        from intent_accumulator import (
+                            get_schema_reference as _get_schema_grp,
+                        )
+                        _alsr_schema_grp = _get_schema_grp()
+                        if _alsr_schema_grp:
+                            _g_result = _alsr_resolve_grp(
+                                _grouping_phrase, _alsr_schema_grp
+                            )
+                            if _g_result.status == "resolved":
+                                _alsr_grouping_binding = _g_result.binding
+                                logger.info(
+                                    f"[GROUPING] ALSR resolved grouping → "
+                                    f"{_g_result.binding.qualified}"
+                                )
+                            else:
+                                logger.info(
+                                    f"[GROUPING] Phrase detected but ALSR "
+                                    f"unresolved ({_g_result.status}) → "
+                                    f"no binding applied"
+                                )
+                except ImportError:
+                    logger.debug(
+                        "[GROUPING] grouping_phrase_detector not available"
+                    )
+
                 # Merge into accumulated state
                 if accumulated and self.merger:
                     accumulated = self.merger.merge(accumulated, extraction.intent, query)
                     session["accumulated_intent"] = accumulated
+
+                    # =========================================================
+                    # ALSR: Apply bindings to accumulated state (v6.22)
+                    # =========================================================
+                    # Bindings are applied AFTER merge so that merge's optional
+                    # clear() cannot wipe them. Bindings are additive — they
+                    # accumulate across clarification turns until clear() is
+                    # called on success.
+                    # =========================================================
+                    _alsr_any = False
+                    if _alsr_entity_binding:
+                        accumulated.attribute_bindings.append(_alsr_entity_binding)
+                        accumulated.group_by_targets.append(_alsr_entity_binding.qualified)
+                        _alsr_any = True
+                    if _alsr_metric_binding:
+                        accumulated.attribute_bindings.append(_alsr_metric_binding)
+                        _alsr_any = True
+                    if _alsr_event_binding:
+                        accumulated.attribute_bindings.append(_alsr_event_binding)
+                        _alsr_any = True
+                    if _alsr_grouping_binding:
+                        accumulated.attribute_bindings.append(_alsr_grouping_binding)
+                        accumulated.group_by_targets.append(_alsr_grouping_binding.qualified)
+                        _alsr_any = True
+                    if _alsr_any:
+                        session["accumulated_intent"] = accumulated
 
                     # Evaluate (SOLE DECISION POINT)
                     decision = evaluate(accumulated)
@@ -257,6 +580,38 @@ class QueryPipeline:
             else:
                 # Extraction failed - proceed with original query anyway
                 query_for_nlsql = query
+
+            # =================================================================
+            # ALSR HINT INJECTION (v6.22 audit fix — Invariant 3)
+            # =================================================================
+            # Enrich query_for_nlsql with ALSR-resolved column mappings so the
+            # NL-SQL engine knows which specific columns were identified.
+            # Without this injection, ALSR's bindings exist only in IntentState
+            # and the LLM must rediscover column references independently.
+            #
+            # Pattern: same as semantic role hint (get_fk_hint_for_query) and
+            # structured context binding — append deterministic text to query.
+            #
+            # Runs ONLY when ALSR produced bindings for this turn (attribute_bindings
+            # non-empty). No-op on every non-ALSR path (zero overhead).
+            # =================================================================
+            if (
+                accumulated
+                and getattr(accumulated, 'attribute_bindings', None)
+            ):
+                try:
+                    from semantic_attribute_resolver import format_alsr_query_hint
+                    query_for_nlsql = format_alsr_query_hint(
+                        query_for_nlsql,
+                        getattr(accumulated, 'group_by_targets', []),
+                        accumulated.attribute_bindings,
+                    )
+                    logger.info(
+                        f"[PIPELINE] ALSR hint injected: "
+                        f"bindings={[getattr(b, 'qualified', '?') for b in accumulated.attribute_bindings]}"
+                    )
+                except ImportError:
+                    pass  # ALSR not available; already logged in Phase 1
 
             # =================================================================
             # SEMANTIC CONTEXT BINDING (v6.12 - Structured Constraint Injection)
@@ -356,6 +711,66 @@ class QueryPipeline:
                     sql_query=result.get("sql"),  # Include SQL for debugging
                     clarification_needed=True,
                     reasoning_disclosure=disclose_for_pending_ambiguity(pending),
+                )
+
+            # =================================================================
+            # COST GUARD INTERCEPT (v6.16 - Conversational Refinement)
+            # =================================================================
+            # If the cost guard blocked execution, enter a clarification loop
+            # instead of returning a hard failure. The user is offered options:
+            # add filters, apply a strict limit, or execute anyway.
+            #
+            # FLOW:
+            # 1. Detect error_type == "cost_guard"
+            # 2. Store cost guard state on accumulated intent
+            # 3. Return conversational clarification (NOT an error)
+            #
+            # CRITICAL: Cost guard is NEVER a hard failure. It is always
+            # a refinement opportunity, following the same pattern as
+            # relational ambiguity.
+            # =================================================================
+            if (not result["success"] and
+                    result.get("error_type") == "cost_guard"):
+
+                estimated_rows = result.get("estimated_rows", 0)
+                threshold = result.get("threshold", 100000)
+                validated_sql = result.get("sql", "")
+                original_limit = extract_limit(validated_sql)
+                logger.info(
+                    f"[PIPELINE] Cost guard triggered: "
+                    f"{estimated_rows:,} estimated rows > {threshold:,} threshold, "
+                    f"original_limit={original_limit}"
+                )
+
+                # Create accumulated state if it doesn't exist (edge case recovery)
+                if not accumulated:
+                    from intent_accumulator import create_intent_state
+                    accumulated = create_intent_state()
+                    logger.info("[PIPELINE] Created accumulated state for cost guard")
+
+                # Store validated SQL for direct re-execution (no LLM needed)
+                accumulated.set_pending_cost_guard(
+                    estimated_rows=estimated_rows,
+                    threshold=threshold,
+                    original_sql=validated_sql,
+                    original_limit=original_limit,
+                )
+                session["accumulated_intent"] = accumulated
+
+                # Ask user for numeric LIMIT
+                response = self._format_cost_guard_numeric_prompt(
+                    accumulated.pending_cost_guard
+                )
+
+                # CRITICAL: Return as clarification, NOT as error
+                return PipelineResult(
+                    success=True,  # Not a failure — just need refinement
+                    response=response,
+                    session_id=session_id,
+                    execution_time=self._elapsed(start),
+                    sql_query=validated_sql,
+                    clarification_needed=True,
+                    reasoning_disclosure=disclose_for_cost_guard(result),
                 )
 
             # =================================================================
@@ -594,6 +1009,41 @@ What would you like to explore?""",
             return False
 
         return False
+
+    # =========================================================================
+    # COST GUARD HELPERS (v6.16 - Numeric LIMIT Refinement)
+    # =========================================================================
+
+    def _parse_numeric_limit(self, query: str) -> Optional[int]:
+        """
+        Parse a user response as a numeric LIMIT value.
+
+        Returns:
+            int if the response is a pure integer, None otherwise.
+
+        Accepted formats:
+            "10", " 25 ", "100"
+        Rejected:
+            "ten", "10 rows", "show 10", "abc", ""
+        """
+        q = query.strip()
+        if q.isdigit():
+            return int(q)
+        return None
+
+    def _format_cost_guard_numeric_prompt(self, pending: Any) -> str:
+        """
+        Format the cost guard clarification as a numeric LIMIT prompt.
+
+        Asks the user how many rows they want to display.
+        """
+        return (
+            f"This query may scan approximately **{pending.estimated_rows:,} rows**, "
+            f"which could be slow or resource-intensive.\n\n"
+            f"How many rows would you like to display?\n"
+            f"Please enter a number (e.g., 10, 25, 100).\n\n"
+            f"You can also rephrase your query with more specific criteria."
+        )
 
     def _elapsed(self, start: datetime) -> float:
         return (datetime.now() - start).total_seconds()

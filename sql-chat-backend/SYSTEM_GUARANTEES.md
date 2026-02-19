@@ -11,9 +11,9 @@
 
 | Guarantee | Module | Enforcement Mechanism |
 |---|---|---|
-| No execution when entity is ambiguous | `intent_accumulator.py` | `can_proceed()` calls `is_ambiguous_entity()` for both aggregation and row-select paths. Returns `False` if entity matches `AMBIGUOUS_SEMANTIC_ALIASES`. |
+| No execution when entity is ambiguous | `intent_accumulator.py` | `can_proceed()` calls `is_ambiguous_entity()` for both aggregation and row-select paths. Returns `False` if `entity_resolution_candidates` has 2+ entries (set by `entity_resolver.py` in the pipeline). |
 | No execution when metric is missing | `intent_accumulator.py` | `can_proceed()` requires `has_metric() == True`. Invalid metric tokens (`list`, `show`, etc.) and bare aggregation primitives with ranking are rejected. |
-| No silent entity rebinding | `intent_accumulator.py` | Ambiguous aliases (`customer`, `user`, `member`) always trigger clarification with explicit options derived from `AMBIGUOUS_SEMANTIC_ALIASES`. |
+| No silent entity rebinding | `entity_resolver.py` + `intent_accumulator.py` | `entity_resolver.resolve_entity()` matches LLM-emitted entities against the live schema. Ambiguous matches (2+ candidates above threshold) are stored on `IntentState.entity_resolution_candidates` and trigger clarification via `is_ambiguous_entity()`. No hardcoded domain mappings. |
 | No silent metric inference | `intent_accumulator.py` | `has_metric()` rejects action verbs via `INVALID_METRIC_TOKENS`. Bare aggregation primitives require an event binding or explicit user selection. |
 | No execution before clarification | `query_pipeline.py` | `evaluate()` is called before any SQL path. If `decision.proceed == False`, the function returns a `PipelineResult` with `clarification_needed=True` and exits. NL-SQL, RCL, and database execution are unreachable. |
 | Schema-grounded SQL generation only | `main.py` | `NLSQLTableQueryEngine` reads schema via SQLAlchemy introspection. No schema is injected into prompts. |

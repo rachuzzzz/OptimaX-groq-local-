@@ -483,15 +483,32 @@ class RelationalCorrector:
                 original_sql=sql
             )
 
-        # Find columns that don't exist on the primary table
+        # v6.20: Belt-and-suspenders guard against duplicate JOINs.
+        #
+        # The Canonical Alias Injector (pre-RCL) pre-qualifies columns that are
+        # accessible from already-joined tables, so RCL should see no unqualified
+        # references for those columns at this point.  However, if the injector
+        # skips normalization (e.g. CTE, UNION, or an internal error), we apply
+        # a secondary check here: a column is only "missing" if it cannot be
+        # found in ANY table that is already present in the query (primary OR
+        # joined tables).  Without this guard, RCL would add a duplicate JOIN
+        # for a table that is already in the FROM/JOIN clause, producing
+        # inconsistent SQL that fails alias validation.
+        all_query_tables: set = set(table_aliases.values())
+
         missing_columns = []
         for col in unqualified_columns:
-            if not self.schema.column_exists_in_table(primary_table, col):
+            col_found_in_query = any(
+                self.schema.column_exists_in_table(t, col)
+                for t in all_query_tables
+            )
+            if not col_found_in_query:
                 missing_columns.append(col)
 
         if not missing_columns:
-            # All columns exist on primary table - no correction needed
-            logger.debug("[RCL] All columns exist on primary table - no correction needed")
+            # All unqualified columns are accessible from tables already in the
+            # query — no structural correction is required.
+            logger.debug("[RCL] All columns accessible from existing query tables - no correction needed")
             return CorrectionResult(
                 success=True,
                 corrected_sql=sql,

@@ -241,23 +241,23 @@ def disclose_cost_refusal(
 
     Template rules:
         - States factual reason
-        - Frames refusal as protection
-        - Suggests narrowing
+        - Frames as clarification, not failure (v6.16)
+        - Lists available actions
 
     Returns:
         Deterministic disclosure string.
     """
     if estimated_rows is not None:
         return (
-            f"Query not executed: estimated row scan of {estimated_rows:,} "
+            f"Query paused: estimated row scan of {estimated_rows:,} "
             f"exceeds the safety threshold. "
-            f"Narrow the query with filters to reduce scope."
+            f"User asked to specify desired row count."
         )
 
     if error_type == "cost_guard":
         return (
-            "Query not executed: estimated cost exceeds safety threshold. "
-            "Narrow the query with filters to reduce scope."
+            "Query paused: estimated cost exceeds safety threshold. "
+            "User asked to specify desired row count."
         )
 
     return "Query not executed due to safety constraints."
@@ -468,4 +468,26 @@ def disclose_for_cost_guard(result: Dict[str, Any]) -> str:
     return disclose_cost_refusal(
         estimated_rows=result.get("estimated_rows"),
         error_type=result.get("error_type"),
+    )
+
+
+def disclose_for_cost_limit_rewrite(estimated_rows: int, new_limit: int) -> str:
+    """
+    Build disclosure when user specifies a numeric LIMIT for cost guard refinement.
+
+    v6.16: Numeric LIMIT refinement — no menu, no override.
+
+    Source: PendingCostGuard (estimated_rows), user-specified LIMIT
+
+    Args:
+        estimated_rows: Original EXPLAIN estimate
+        new_limit: User-specified LIMIT value
+
+    Returns:
+        Deterministic disclosure string.
+    """
+    return (
+        f"User specified LIMIT {new_limit:,} to reduce scope. "
+        f"Original SQL reused with rewritten LIMIT (no regeneration). "
+        f"Original estimate was {estimated_rows:,} rows."
     )
