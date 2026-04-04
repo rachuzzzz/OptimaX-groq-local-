@@ -988,6 +988,22 @@ class IntentState:
     # The NL-SQL generator can use these as GROUP BY column hints.
     group_by_targets: List[str] = field(default_factory=list)
 
+    # Clarification tracking (v6.23)
+    # Records which field triggered the last clarification so IntentMerger can
+    # distinguish an entity-clarification response ("passenger" answering
+    # "which table?") from a metric-clarification response ("by passenger count"
+    # answering "how should I rank?").
+    #
+    # Values: "entity_type" | "entity_disambiguation" | "metric" |
+    #         "fk_projection" | "comparison" | None
+    #
+    # CRITICAL INVARIANT:
+    #   evaluate() MUST set this at every exit point (None on PROCEED, field
+    #   name on CLARIFY). IntentMerger.merge() reads it before it is reset by
+    #   the NEXT call to evaluate(), which happens AFTER merge() completes.
+    #   Reset to None by clear() and by evaluate() on PROCEED.
+    pending_clarification: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "entity_type": self.entity_type,
@@ -1023,6 +1039,7 @@ class IntentState:
                 for b in self.attribute_bindings
             ] if self.attribute_bindings else [],
             "group_by_targets": self.group_by_targets,
+            "pending_clarification": self.pending_clarification,  # v6.23
         }
 
     def has_entity(self) -> bool:
@@ -1336,6 +1353,7 @@ class IntentState:
         self.pending_cost_guard = None  # v6.16: Reset cost guard state
         self.attribute_bindings = []   # v6.22: Reset ALSR attribute bindings
         self.group_by_targets = []     # v6.22: Reset ALSR group-by targets
+        self.pending_clarification = None  # v6.23: Reset clarification tracking
 
         # Preserve FK preferences unless explicitly clearing everything
         if not preserve_fk_preferences:
@@ -1560,8 +1578,16 @@ class IntentMerger:
         # =====================================================================
         could_proceed_before = accumulated.can_proceed()
 
+        # =====================================================================
+        # v6.23: Capture continuation flag BEFORE any state changes.
+        # is_new_query() is a pure function — safe to call twice, but we
+        # capture it once so the entity preservation guard below uses the
+        # SAME classification without any risk of state-dependent divergence.
+        # =====================================================================
+        _is_continuation = not is_new_query(user_message, accumulated.turn_count > 0)
+
         # Check if new query
-        if is_new_query(user_message, accumulated.turn_count > 0):
+        if not _is_continuation:
             if accumulated.turn_count > 0:
                 logger.info("[INTENT] New query - clearing state (preserving FK preferences)")
                 # Clear intent fields but PRESERVE FK preferences (v6.1.1)
@@ -1578,40 +1604,98 @@ class IntentMerger:
         accumulated.turn_count += 1
 
         # =====================================================================
-        # v6.6: ENTITY OVERRIDE FIX
+        # v6.6 + v6.23: ENTITY OVERRIDE WITH CLARIFICATION GUARD
         # =====================================================================
-        # BUG: _fill() only fills gaps, so an explicit entity in the new query
-        # was ignored if accumulated already had an entity. This caused
-        # "top flights" to incorrectly use entity=customer from a previous query.
+        # v6.6 FIX: If current extraction has an explicit entity, OVERRIDE the
+        # accumulated entity (prevents "top flights" using stale entity=customer).
         #
-        # FIX: If current extraction has an explicit entity, ALWAYS override.
-        # When entity changes, also clear entity-dependent state (metric).
+        # v6.23 FIX: The v6.6 rule was too broad. On a CONTINUATION turn
+        # (the user is answering a clarification question, not starting a new
+        # query), the LLM often extracts a spurious entity from the metric
+        # answer text. For example, "by passenger count" → entity="passenger".
+        # That "passenger" is a DIMENSIONAL LABEL for the metric, not a new
+        # subject to query. Overwriting entity_type here was breaking the
+        # multi-turn accumulation invariant: "top routes" + "by passenger count"
+        # was producing entity=passenger instead of entity=route.
         #
-        # RULE:
-        #   - new_entity specified -> OVERRIDE accumulated entity
-        #   - new_entity not specified -> KEEP accumulated entity (continuation)
+        # RULE (v6.23):
+        #   Continuation turn + entity already resolved + NOT clarifying entity
+        #     → PRESERVE original entity (metric/event label extracted separately)
+        #   New query OR entity was absent OR clarifying entity itself
+        #     → OVERRIDE entity (v6.6 behavior, unchanged)
+        #
+        # "clarifying entity" = pending_clarification in
+        #   ("entity_type", "entity_disambiguation")
+        # These are the two states where the user IS expected to supply a new
+        # entity name as their response, so we must allow the override.
         # =====================================================================
         new_entity = self._get_value(new_intent, "entity_type")
 
         if new_entity is not None:
             old_entity = accumulated.entity_type
             if old_entity is not None and old_entity != new_entity:
-                logger.debug(
-                    f"[INTENT] Entity override: '{old_entity}' -> '{new_entity}' "
-                    f"(clearing stale metric and updating NL query)"
+                # Determine whether the current pending clarification is about
+                # the entity itself. If so, the user's response IS the new entity
+                # and we must allow the override.
+                _clarifying_entity = accumulated.pending_clarification in (
+                    "entity_type", "entity_disambiguation"
                 )
-                # Clear metric when entity changes - metric may be entity-specific
-                accumulated.metric = None
-                # =========================================================
-                # v6.7: BUG 1 FIX - Update NL query on entity override
-                # =========================================================
-                # When entity changes, the stored original_query becomes stale.
-                # If can_proceed() returns True, execution would use the OLD
-                # query text. Fix: update original_query to current message.
-                # =========================================================
-                accumulated.original_query = user_message
-                logger.debug(f"[INTENT] NL query updated to: '{user_message[:50]}...'")
-            accumulated.entity_type = new_entity
+
+                if _is_continuation and accumulated.has_entity() and not _clarifying_entity:
+                    # =========================================================
+                    # v6.23: ENTITY PRESERVED + DIMENSIONAL ROUTING
+                    # =========================================================
+                    # The new entity extracted from the clarification text is
+                    # a dimensional label (e.g., "passenger" from "by passenger
+                    # count"), NOT a replacement for the original entity.
+                    # entity_type is NOT updated.
+                    #
+                    # DIMENSIONAL ROUTING: for bare-aggregation+ranking queries
+                    # (e.g., count+top_n), has_metric() requires event or
+                    # group_by to be non-null. When the LLM puts the dimensional
+                    # label in entity_type ("passenger") instead of event, the
+                    # completeness check fails without an extra turn. Routing the
+                    # dropped entity candidate to accumulated.event resolves this
+                    # in the same turn without adding heuristics.
+                    #
+                    # Guard: only fills when event is absent — never overwrites.
+                    # =========================================================
+                    logger.info(
+                        "[INTENT_MERGE] existing_entity=%s new_entity_candidate=%s "
+                        "clarification_pending=%s action=preserve_original_entity",
+                        old_entity,
+                        new_entity,
+                        accumulated.pending_clarification or "metric",
+                    )
+                    if not accumulated.event and new_entity not in ("unknown", None, ""):
+                        accumulated.event = new_entity
+                        logger.info(
+                            "[INTENT_MERGE] new_entity_candidate=%s → event "
+                            "(dimensional context; satisfies bare-aggregation completeness)",
+                            new_entity,
+                        )
+                    # entity_type intentionally NOT updated
+                else:
+                    # =========================================================
+                    # v6.6 + v6.7: ENTITY OVERRIDE — new query or entity
+                    # clarification response
+                    # =========================================================
+                    logger.debug(
+                        f"[INTENT] Entity override: '{old_entity}' -> '{new_entity}' "
+                        f"(clearing stale metric and updating NL query)"
+                    )
+                    # Clear metric when entity changes (entity-specific metric
+                    # from prior turn is no longer valid for the new entity)
+                    accumulated.metric = None
+                    # v6.7: Update NL query to current message so NL-SQL does
+                    # not execute stale original_query text after entity change
+                    accumulated.original_query = user_message
+                    logger.debug(f"[INTENT] NL query updated to: '{user_message[:50]}...'")
+                    accumulated.entity_type = new_entity
+            else:
+                # new_entity == old_entity (same, no-op) or old_entity is None
+                # (entity was absent; initial set — always safe)
+                accumulated.entity_type = new_entity
 
         # =====================================================================
         # v6.6: METRIC OVERRIDE
@@ -1662,11 +1746,32 @@ class IntentMerger:
 
         if not could_proceed_before and can_proceed_now:
             # Transition detected: False -> True
-            accumulated.original_query = user_message
-            logger.info(
-                f"[INTENT] can_proceed transition (False->True): "
-                f"original_query = '{user_message[:50]}...'"
-            )
+            #
+            # v6.23: When entity was preserved from a prior turn (continuation),
+            # the prior turn's original_query holds the entity context and the
+            # current message holds the metric context. Compose both so the
+            # NL-SQL generator receives the full query: "top routes by passenger count"
+            # rather than just the fragment: "by passenger count".
+            #
+            # Guard: only compose if original_query is non-null and different
+            # from the current message (prevents "q q" duplication on edge cases).
+            if (
+                _is_continuation
+                and accumulated.original_query
+                and accumulated.original_query.strip() != user_message.strip()
+            ):
+                composed = f"{accumulated.original_query.strip()} {user_message.strip()}"
+                accumulated.original_query = composed
+                logger.info(
+                    f"[INTENT] can_proceed transition (False->True, continuation): "
+                    f"original_query composed = '{composed[:60]}...'"
+                )
+            else:
+                accumulated.original_query = user_message
+                logger.info(
+                    f"[INTENT] can_proceed transition (False->True): "
+                    f"original_query = '{user_message[:50]}...'"
+                )
 
         logger.info(
             f"[INTENT] After merge: entity={accumulated.entity_type}, "
@@ -1797,6 +1902,7 @@ def evaluate(accumulated: IntentState) -> IntentDecision:
     # v6.2: Check for comparison queries FIRST (hard block)
     if accumulated.is_comparison_query():
         logger.info("[INTENT] [X] BLOCK (comparison query detected)")
+        accumulated.pending_clarification = "comparison"  # v6.23
         return IntentDecision(
             proceed=False,
             clarification=(
@@ -1829,6 +1935,7 @@ def evaluate(accumulated: IntentState) -> IntentDecision:
         # =================================================================
         fk_result = _check_fk_projection(accumulated)
         if not fk_result.allowed:
+            accumulated.pending_clarification = "fk_projection"  # v6.23
             return _make_fk_clarification(accumulated, fk_result)
 
         if fk_result.reason == "fk_reachable":
@@ -1837,6 +1944,7 @@ def evaluate(accumulated: IntentState) -> IntentDecision:
             logger.info("[INTENT] [OK] PROCEED (row-select: entity known, no aggregation)")
         else:
             logger.info("[INTENT] [OK] PROCEED (entity + metric known)")
+        accumulated.pending_clarification = None  # v6.23: clear on PROCEED
         return IntentDecision(proceed=True)
 
     # Generate clarification for missing field (with context)
@@ -1849,6 +1957,7 @@ def evaluate(accumulated: IntentState) -> IntentDecision:
     )
     logger.info(f"[INTENT] [X] CLARIFY (missing: {missing})")
 
+    accumulated.pending_clarification = missing  # v6.23: track what we're asking about
     return IntentDecision(
         proceed=False,
         clarification=question,

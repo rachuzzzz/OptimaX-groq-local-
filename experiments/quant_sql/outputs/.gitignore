@@ -1,0 +1,3 @@
+# Experiment results are large and machine-specific — don't commit them.
+*
+!.gitignore

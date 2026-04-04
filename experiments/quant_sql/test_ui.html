@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quant SQL Test Interface</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0f1117;
+    --surface:   #1a1d2e;
+    --surface2:  #22263a;
+    --border:    #2e3350;
+    --accent:    #4f7cff;
+    --accent-dim:#2a4aaa;
+    --green:     #3ddc84;
+    --red:       #ff5c5c;
+    --yellow:    #f5c542;
+    --text:      #e4e6f0;
+    --text-dim:  #7a7f9d;
+    --code-bg:   #090c14;
+    --radius:    8px;
+    --mono:      'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  }
+
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 14px; }
+
+  /* ── Layout ──────────────────────────────────────────────────────────── */
+  .layout { display: grid; grid-template-rows: 48px 1fr; height: 100vh; overflow: hidden; }
+  .content { display: grid; grid-template-columns: 340px 1fr; overflow: hidden; }
+
+  /* ── Header ──────────────────────────────────────────────────────────── */
+  .header {
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 20px; gap: 16px;
+  }
+  .header-title { font-weight: 600; font-size: 15px; flex: 1; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500;
+  }
+  .badge-dot { width: 6px; height: 6px; border-radius: 50%; }
+  .badge-ok   { background: rgba(61,220,132,.12); color: var(--green); }
+  .badge-ok .badge-dot   { background: var(--green); }
+  .badge-warn { background: rgba(245,197,66,.12); color: var(--yellow); }
+  .badge-warn .badge-dot { background: var(--yellow); }
+  .badge-err  { background: rgba(255,92,92,.12); color: var(--red); }
+  .badge-err .badge-dot  { background: var(--red); }
+
+  /* ── Sidebar ─────────────────────────────────────────────────────────── */
+  .sidebar {
+    background: var(--surface); border-right: 1px solid var(--border);
+    padding: 20px; display: flex; flex-direction: column; gap: 16px;
+    overflow-y: auto;
+  }
+
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: .6px; }
+
+  select, textarea {
+    background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius);
+    color: var(--text); font-size: 13px; padding: 8px 10px; width: 100%;
+    transition: border-color .15s;
+  }
+  select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  textarea { resize: vertical; font-family: inherit; line-height: 1.5; }
+
+  /* Model radio cards */
+  .model-cards { display: flex; flex-direction: column; gap: 6px; }
+  .model-card {
+    display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    cursor: pointer; background: var(--surface2); transition: border-color .15s, background .15s;
+    user-select: none;
+  }
+  .model-card:hover { border-color: var(--accent-dim); }
+  .model-card.selected { border-color: var(--accent); background: rgba(79,124,255,.08); }
+  .model-card input[type=radio] { accent-color: var(--accent); }
+  .model-card-info { flex: 1; }
+  .model-card-name { font-weight: 600; font-size: 13px; }
+  .model-card-desc { font-size: 11px; color: var(--text-dim); margin-top: 1px; }
+  .model-card-avail { font-size: 10px; font-weight: 600; }
+  .avail-ok   { color: var(--green); }
+  .avail-warn { color: var(--yellow); }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 8px 14px; border-radius: var(--radius); border: none;
+    font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity .15s, transform .1s;
+    white-space: nowrap;
+  }
+  .btn:active { transform: scale(.97); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; transform: none; }
+  .btn-primary { background: var(--accent); color: #fff; width: 100%; }
+  .btn-primary:hover:not(:disabled) { opacity: .88; }
+  .btn-ghost {
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border); padding: 5px 10px;
+    font-size: 12px; border-radius: 6px;
+  }
+  .btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+
+  /* Status row */
+  .status-row {
+    display: flex; align-items: center; gap: 8px; font-size: 12px;
+    padding: 8px 10px; border-radius: var(--radius); background: var(--surface2);
+    min-height: 36px;
+  }
+  .spinner {
+    width: 14px; height: 14px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: spin .7s linear infinite; flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .status-icon { font-size: 14px; flex-shrink: 0; }
+  .status-text { color: var(--text-dim); flex: 1; }
+  .status-time { color: var(--text-dim); font-size: 11px; font-family: var(--mono); }
+
+  /* ── Main panel ──────────────────────────────────────────────────────── */
+  .main {
+    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--bg);
+  }
+
+  /* Tabs */
+  .tabs {
+    display: flex; border-bottom: 1px solid var(--border);
+    background: var(--surface); flex-shrink: 0;
+  }
+  .tab {
+    padding: 11px 20px; font-size: 13px; font-weight: 500; cursor: pointer;
+    color: var(--text-dim); border-bottom: 2px solid transparent; margin-bottom: -1px;
+    transition: color .15s;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-count {
+    display: inline-block; background: var(--accent); color: #fff;
+    border-radius: 10px; font-size: 10px; padding: 1px 6px; margin-left: 6px;
+  }
+
+  /* Tab panels */
+  .tab-panels { flex: 1; overflow: hidden; position: relative; }
+  .panel { display: none; height: 100%; overflow-y: auto; padding: 20px; flex-direction: column; gap: 16px; }
+  .panel.active { display: flex; }
+
+  /* Empty state */
+  .empty-state {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 10px; color: var(--text-dim);
+  }
+  .empty-icon { font-size: 36px; opacity: .4; }
+  .empty-label { font-size: 13px; }
+
+  /* Section card */
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .card-header {
+    display: flex; align-items: center; padding: 10px 14px; gap: 10px;
+    border-bottom: 1px solid var(--border); background: var(--surface2);
+    font-size: 12px; font-weight: 600; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .6px;
+  }
+  .card-header .flex-1 { flex: 1; }
+  .card-body { padding: 0; }
+
+  /* SQL block */
+  .sql-pre {
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.65;
+    background: var(--code-bg); color: #c9d1d9; padding: 16px;
+    white-space: pre-wrap; word-break: break-word;
+    border: none; overflow-x: auto; margin: 0;
+  }
+
+  /* Metadata chips */
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-size: 11px; padding: 2px 8px; border-radius: 10px;
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text-dim);
+    font-family: var(--mono);
+  }
+  .chip-good { border-color: rgba(61,220,132,.4); color: var(--green); background: rgba(61,220,132,.06); }
+  .chip-bad  { border-color: rgba(255,92,92,.4);  color: var(--red);   background: rgba(255,92,92,.06); }
+
+  /* Clarification box */
+  .clarification-box {
+    background: rgba(245,197,66,.06); border: 1px solid rgba(245,197,66,.35);
+    border-radius: var(--radius); padding: 14px 16px;
+    font-size: 13px; color: var(--text); line-height: 1.6;
+  }
+  .clarification-box strong { color: var(--yellow); }
+
+  /* Error box */
+  .error-box {
+    background: rgba(255,92,92,.06); border: 1px solid rgba(255,92,92,.35);
+    border-radius: var(--radius); padding: 14px 16px;
+    font-size: 13px; color: var(--red); line-height: 1.6;
+    font-family: var(--mono); white-space: pre-wrap;
+  }
+
+  /* Data table */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  thead th {
+    background: var(--surface2); padding: 8px 12px; text-align: left;
+    font-size: 11px; font-weight: 600; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .5px;
+    border-bottom: 1px solid var(--border); white-space: nowrap;
+    position: sticky; top: 0;
+  }
+  tbody tr { border-bottom: 1px solid var(--border); }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: rgba(255,255,255,.02); }
+  tbody td { padding: 7px 12px; color: var(--text); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.null-val { color: var(--text-dim); font-style: italic; }
+
+  /* Raw output */
+  .raw-pre {
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.5;
+    background: var(--code-bg); color: var(--text-dim); padding: 14px;
+    white-space: pre-wrap; word-break: break-word; overflow-x: auto; max-height: 320px;
+  }
+
+  /* Toast */
+  #toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(40px);
+    background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 10px 18px; font-size: 13px; color: var(--text); opacity: 0;
+    transition: opacity .2s, transform .2s; pointer-events: none; z-index: 1000;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* Divider */
+  .sep { border: none; border-top: 1px solid var(--border); }
+
+  /* Responsive hint text */
+  .hint { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+</style>
+</head>
+<body>
+
+<div class="layout">
+
+  <!-- ── Header ───────────────────────────────────────────────────────── -->
+  <header class="header">
+    <span class="header-title">Quant SQL Test Interface</span>
+    <span id="badge-q4"      class="badge badge-warn"><span class="badge-dot"></span>Q4</span>
+    <span id="badge-q8"      class="badge badge-warn"><span class="badge-dot"></span>Q8</span>
+    <span id="badge-db"      class="badge badge-warn"><span class="badge-dot"></span>DB</span>
+    <span id="badge-optimax" class="badge badge-warn"><span class="badge-dot"></span>OptimaX</span>
+  </header>
+
+  <div class="content">
+
+    <!-- ── Sidebar ───────────────────────────────────────────────────── -->
+    <aside class="sidebar">
+
+      <!-- Model selection -->
+      <div class="field">
+        <label>Model</label>
+        <div class="model-cards" id="model-cards">
+
+          <label class="model-card selected" id="card-Q4_K_M">
+            <input type="radio" name="model" value="Q4_K_M" checked>
+            <div class="model-card-info">
+              <div class="model-card-name">Q4_K_M</div>
+              <div class="model-card-desc">4-bit mixed precision · ~4.9 GB · Llama 3.1 8B</div>
+            </div>
+            <span class="model-card-avail avail-warn" id="avail-Q4_K_M">?</span>
+          </label>
+
+          <label class="model-card" id="card-Q8_0">
+            <input type="radio" name="model" value="Q8_0">
+            <div class="model-card-info">
+              <div class="model-card-name">Q8_0</div>
+              <div class="model-card-desc">8-bit uniform · ~8.5 GB · Llama 3.1 8B</div>
+            </div>
+            <span class="model-card-avail avail-warn" id="avail-Q8_0">?</span>
+          </label>
+
+          <label class="model-card" id="card-OPTIMAX">
+            <input type="radio" name="model" value="OPTIMAX">
+            <div class="model-card-info">
+              <div class="model-card-name">OptimaX (Production)</div>
+              <div class="model-card-desc">Groq llama-3.3-70b · Full governance pipeline</div>
+            </div>
+            <span class="model-card-avail avail-warn" id="avail-OPTIMAX">?</span>
+          </label>
+
+        </div>
+      </div>
+
+      <hr class="sep">
+
+      <!-- Test query picker -->
+      <div class="field">
+        <label>Test Query</label>
+        <select id="query-picker">
+          <option value="">— custom query —</option>
+        </select>
+        <span class="hint">Or type a custom query below</span>
+      </div>
+
+      <!-- Query input -->
+      <div class="field">
+        <label>NL Query</label>
+        <textarea id="query-input" rows="5" placeholder="e.g. Top 10 passengers with the most frequent flyer points"></textarea>
+      </div>
+
+      <!-- Generate button -->
+      <button class="btn btn-primary" id="generate-btn" onclick="generate()">
+        <span id="btn-icon">▶</span>
+        <span id="btn-label">Generate SQL</span>
+      </button>
+
+      <!-- Status row -->
+      <div class="status-row" id="status-row">
+        <span class="status-icon" id="status-icon">○</span>
+        <span class="status-text" id="status-text">Ready</span>
+        <span class="status-time" id="status-time"></span>
+      </div>
+
+    </aside>
+
+    <!-- ── Main panel ────────────────────────────────────────────────── -->
+    <main class="main">
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <div class="tab active" id="tab-sql"  onclick="showTab('sql')">SQL</div>
+        <div class="tab"        id="tab-data" onclick="showTab('data')">
+          Data <span class="tab-count" id="data-count" style="display:none">0</span>
+        </div>
+        <div class="tab"        id="tab-raw"  onclick="showTab('raw')">Raw Output</div>
+      </div>
+
+      <div class="tab-panels">
+
+        <!-- SQL panel -->
+        <div class="panel active" id="panel-sql">
+          <div id="sql-empty" class="empty-state">
+            <div class="empty-icon">⌗</div>
+            <div class="empty-label">Generated SQL will appear here</div>
+          </div>
+
+          <!-- Clarification request (OptimaX) -->
+          <div id="clar-box" class="clarification-box" style="display:none">
+            <strong>OptimaX needs clarification:</strong><br>
+            <span id="clar-text"></span>
+          </div>
+
+          <!-- Error box -->
+          <div id="error-box" class="error-box" style="display:none"></div>
+
+          <!-- SQL card -->
+          <div id="sql-card" class="card" style="display:none">
+            <div class="card-header">
+              <span class="flex-1" id="sql-card-title">Generated SQL</span>
+              <button class="btn btn-ghost" onclick="copySQL()">Copy</button>
+              <button class="btn btn-ghost" id="exec-btn" onclick="executeSQL()">Execute ▶</button>
+            </div>
+            <div class="card-body">
+              <pre class="sql-pre" id="sql-pre"></pre>
+            </div>
+          </div>
+
+          <!-- Metadata chips -->
+          <div id="meta-chips" class="chips" style="display:none"></div>
+
+          <!-- OptimaX message (if provided) -->
+          <div id="optimax-msg-box" style="display:none; font-size:13px; color:var(--text-dim); line-height:1.6; padding:4px 0;">
+            <strong style="color:var(--text)">OptimaX:</strong> <span id="optimax-msg-text"></span>
+          </div>
+        </div>
+
+        <!-- Data panel -->
+        <div class="panel" id="panel-data">
+          <div id="data-empty" class="empty-state">
+            <div class="empty-icon">⊞</div>
+            <div class="empty-label">Click "Execute" to run the SQL and see results</div>
+          </div>
+          <div id="data-error" class="error-box" style="display:none"></div>
+          <div id="data-card" class="card" style="display:none">
+            <div class="card-header">
+              <span class="flex-1">Query Results</span>
+              <span id="row-count-label" style="font-size:11px;"></span>
+            </div>
+            <div class="card-body table-wrap">
+              <table id="data-table"></table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Raw output panel -->
+        <div class="panel" id="panel-raw">
+          <div id="raw-empty" class="empty-state">
+            <div class="empty-icon">≡</div>
+            <div class="empty-label">Raw llama.cpp output appears here (Q4/Q8 only)</div>
+          </div>
+          <div id="raw-card" class="card" style="display:none">
+            <div class="card-header">
+              <span class="flex-1">Raw Model Output</span>
+              <button class="btn btn-ghost" onclick="copyRaw()">Copy</button>
+            </div>
+            <div class="card-body">
+              <pre class="raw-pre" id="raw-pre"></pre>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- tab-panels -->
+    </main>
+
+  </div><!-- content -->
+</div><!-- layout -->
+
+<div id="toast"></div>
+
+<script>
+// ─── State ─────────────────────────────────────────────────────────────────
+let _generating = false;
+let _timerInterval = null;
+let _timerStart = 0;
+let _currentSQL = '';
+
+// ─── Initialisation ─────────────────────────────────────────────────────────
+(async function init() {
+  await Promise.all([loadStatus(), loadQueries()]);
+})();
+
+async function loadStatus() {
+  try {
+    const s = await api('/api/status');
+    setBadge('badge-q4',      s.q4_available);
+    setBadge('badge-q8',      s.q8_available);
+    setBadge('badge-db',      s.db_available);
+    setBadge('badge-optimax', s.optimax_available);
+
+    // Per-card availability indicators
+    setAvail('Q4_K_M',  s.q4_available,      s.llama_available);
+    setAvail('Q8_0',    s.q8_available,       s.llama_available);
+    setAvail('OPTIMAX', s.optimax_available,  true);
+
+    // If no DB, disable execute button
+    if (!s.db_available) {
+      document.getElementById('exec-btn').title = 'DATABASE_URL not configured';
+    }
+  } catch(e) {
+    console.warn('Status check failed:', e);
+  }
+}
+
+function setBadge(id, ok) {
+  const el = document.getElementById(id);
+  el.className = 'badge ' + (ok ? 'badge-ok' : 'badge-err');
+}
+
+function setAvail(model, ok, prereqOk) {
+  const el = document.getElementById('avail-' + model);
+  if (!el) return;
+  if (!prereqOk && model !== 'OPTIMAX') {
+    el.textContent = '✗ llama-cli missing'; el.className = 'model-card-avail avail-warn';
+  } else if (ok) {
+    el.textContent = '✓';                   el.className = 'model-card-avail avail-ok';
+  } else {
+    el.textContent = '✗';                   el.className = 'model-card-avail avail-warn';
+  }
+}
+
+async function loadQueries() {
+  try {
+    const queries = await api('/api/queries');
+    const sel = document.getElementById('query-picker');
+    const tierNames = {1:'Tier 1 – Single table', 2:'Tier 2 – Aggregation', 3:'Tier 3 – Single JOIN', 4:'Tier 4 – Multi-hop', 5:'Tier 5 – Agg + JOIN'};
+    let lastTier = 0;
+    queries.forEach(q => {
+      if (q.tier !== lastTier) {
+        const og = document.createElement('optgroup');
+        og.label = tierNames[q.tier] || 'Tier ' + q.tier;
+        sel.appendChild(og);
+        lastTier = q.tier;
+      }
+      const opt = document.createElement('option');
+      opt.value = q.nl;
+      opt.textContent = `Q${String(q.id).padStart(2,'0')}  ${q.nl}`;
+      sel.appendChild(opt);
+    });
+  } catch(e) {
+    console.warn('Queries load failed:', e);
+  }
+}
+
+// ─── Query picker ────────────────────────────────────────────────────────────
+document.getElementById('query-picker').addEventListener('change', function() {
+  if (this.value) document.getElementById('query-input').value = this.value;
+});
+
+// ─── Model card selection ────────────────────────────────────────────────────
+document.querySelectorAll('.model-card input[type=radio]').forEach(r => {
+  r.addEventListener('change', () => {
+    document.querySelectorAll('.model-card').forEach(c => c.classList.remove('selected'));
+    r.closest('.model-card').classList.add('selected');
+  });
+});
+
+// ─── Tab switching ────────────────────────────────────────────────────────────
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.getElementById('panel-' + name).classList.add('active');
+}
+
+// ─── Generate ─────────────────────────────────────────────────────────────────
+async function generate() {
+  if (_generating) return;
+  const query = document.getElementById('query-input').value.trim();
+  if (!query) { toast('Enter a query first'); return; }
+  const model = document.querySelector('input[name=model]:checked').value;
+
+  _generating = true;
+  setGenerating(true, model);
+  clearOutput();
+  showTab('sql');
+
+  try {
+    const result = await api('/api/generate', { model, query });
+    handleGenerateResult(result, model);
+  } catch(e) {
+    showError(e.message || String(e));
+    setStatus('error', 'Request failed', null);
+  } finally {
+    _generating = false;
+    setGenerating(false, model);
+  }
+}
+
+function handleGenerateResult(r, model) {
+  stopTimer();
+
+  if (r.error) {
+    showError(r.error);
+    setStatus('error', r.error.slice(0,80), null);
+    return;
+  }
+
+  // Clarification needed (OptimaX)
+  if (r.clarification && r.clar_message) {
+    document.getElementById('clar-text').textContent = r.clar_message;
+    document.getElementById('clar-box').style.display = '';
+    setStatus('warn', 'OptimaX needs clarification', r.elapsed_s);
+    // Show the sql if there was one even alongside clarification
+  }
+
+  if (r.sql) {
+    _currentSQL = r.sql;
+    document.getElementById('sql-pre').textContent = r.sql;
+    document.getElementById('sql-card').style.display = '';
+    document.getElementById('sql-empty').style.display = 'none';
+
+    const titleEl = document.getElementById('sql-card-title');
+    titleEl.textContent = `SQL — ${model}`;
+
+    // Meta chips
+    const chips = [];
+    if (r.elapsed_s != null) chips.push({text: `${r.elapsed_s}s`, cls: ''});
+    chips.push({text: model === 'OPTIMAX' ? 'production 70B' : model, cls: ''});
+    renderChips(chips);
+    document.getElementById('meta-chips').style.display = '';
+
+    if (!r.clarification) setStatus('ok', 'SQL generated', r.elapsed_s);
+  } else {
+    showError('Model did not produce a SQL statement.');
+    setStatus('warn', 'No SQL extracted', r.elapsed_s);
+  }
+
+  // OptimaX response message
+  if (model === 'OPTIMAX' && r.optimax_msg && !r.clarification) {
+    document.getElementById('optimax-msg-text').textContent = r.optimax_msg;
+    document.getElementById('optimax-msg-box').style.display = '';
+  }
+
+  // OptimaX returns data directly — show it
+  if (r.rows && r.rows.length > 0) {
+    renderTable(r.rows, r.columns);
+    setDataCount(r.rows.length);
+  }
+
+  // Raw output (Q4/Q8)
+  if (r.raw_output) {
+    document.getElementById('raw-pre').textContent = r.raw_output;
+    document.getElementById('raw-card').style.display = '';
+    document.getElementById('raw-empty').style.display = 'none';
+  }
+}
+
+// ─── Execute SQL ─────────────────────────────────────────────────────────────
+async function executeSQL() {
+  if (!_currentSQL) { toast('Generate SQL first'); return; }
+
+  const btn = document.getElementById('exec-btn');
+  btn.disabled = true;
+  btn.textContent = 'Executing…';
+  setStatus('running', 'Executing SQL against database…', null);
+  clearDataPanel();
+  showTab('data');
+
+  try {
+    const result = await api('/api/execute', { sql: _currentSQL });
+    if (result.error) {
+      document.getElementById('data-error').style.display = '';
+      document.getElementById('data-error').textContent = result.error;
+      document.getElementById('data-empty').style.display = 'none';
+      setStatus('error', result.error.slice(0,80), null);
+    } else {
+      renderTable(result.rows, result.columns);
+      setDataCount(result.count);
+      setStatus('ok', `${result.count} rows fetched`, null);
+    }
+  } catch(e) {
+    document.getElementById('data-error').textContent = e.message;
+    document.getElementById('data-error').style.display = '';
+    setStatus('error', e.message, null);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Execute ▶';
+  }
+}
+
+// ─── Render helpers ───────────────────────────────────────────────────────────
+function renderTable(rows, cols) {
+  if (!rows || rows.length === 0) {
+    document.getElementById('data-empty').querySelector('.empty-label').textContent = 'Query returned 0 rows';
+    return;
+  }
+
+  const tbl = document.getElementById('data-table');
+  const thead = `<thead><tr>${cols.map(c => `<th title="${c}">${c}</th>`).join('')}</tr></thead>`;
+  const tbody = `<tbody>${rows.map(row =>
+    `<tr>${cols.map(c => {
+      const v = row[c];
+      if (v == null) return `<td class="null-val">NULL</td>`;
+      const s = String(v);
+      const trunc = s.length > 80 ? s.slice(0,80) + '…' : s;
+      return `<td title="${escHtml(s)}">${escHtml(trunc)}</td>`;
+    }).join('')}</tr>`
+  ).join('')}</tbody>`;
+
+  tbl.innerHTML = thead + tbody;
+  document.getElementById('data-card').style.display = '';
+  document.getElementById('data-empty').style.display = 'none';
+}
+
+function setDataCount(n) {
+  const cnt = document.getElementById('data-count');
+  cnt.textContent = n;
+  cnt.style.display = '';
+  document.getElementById('row-count-label').textContent = `${n} row${n !== 1 ? 's' : ''}`;
+}
+
+function renderChips(chips) {
+  const el = document.getElementById('meta-chips');
+  el.innerHTML = chips.map(c => `<span class="chip ${c.cls||''}">${escHtml(c.text)}</span>`).join('');
+}
+
+function showError(msg) {
+  const el = document.getElementById('error-box');
+  el.textContent = msg;
+  el.style.display = '';
+  document.getElementById('sql-empty').style.display = 'none';
+}
+
+function clearOutput() {
+  _currentSQL = '';
+  document.getElementById('sql-card').style.display = 'none';
+  document.getElementById('sql-empty').style.display = '';
+  document.getElementById('error-box').style.display = 'none';
+  document.getElementById('clar-box').style.display = 'none';
+  document.getElementById('meta-chips').style.display = 'none';
+  document.getElementById('optimax-msg-box').style.display = 'none';
+  document.getElementById('raw-card').style.display = 'none';
+  document.getElementById('raw-empty').style.display = '';
+  clearDataPanel();
+  document.getElementById('data-count').style.display = 'none';
+}
+
+function clearDataPanel() {
+  document.getElementById('data-card').style.display = 'none';
+  document.getElementById('data-error').style.display = 'none';
+  document.getElementById('data-empty').style.display = '';
+  document.getElementById('data-table').innerHTML = '';
+}
+
+// ─── Status + Timer ───────────────────────────────────────────────────────────
+function setGenerating(on, model) {
+  const btn = document.getElementById('generate-btn');
+  btn.disabled = on;
+  document.getElementById('btn-icon').textContent  = on ? '' : '▶';
+  document.getElementById('btn-label').textContent = on ? 'Generating…' : 'Generate SQL';
+
+  if (on) {
+    const hint = model === 'OPTIMAX' ? 'Calling OptimaX pipeline…' : `Running ${model} inference (may take 30–120s)…`;
+    setStatus('running', hint, null);
+    startTimer();
+  } else {
+    stopTimer();
+  }
+}
+
+function setStatus(state, msg, elapsed) {
+  const icon = {ok:'✓', error:'✗', warn:'⚠', running:'', idle:'○'}[state] || '○';
+  const spinner = state === 'running';
+
+  const iconEl = document.getElementById('status-icon');
+  const row    = document.getElementById('status-row');
+  iconEl.style.display = spinner ? 'none' : '';
+
+  // Add or remove spinner
+  let sp = row.querySelector('.spinner');
+  if (spinner && !sp) {
+    sp = document.createElement('span');
+    sp.className = 'spinner';
+    row.insertBefore(sp, row.firstChild);
+  } else if (!spinner && sp) {
+    sp.remove();
+  }
+
+  iconEl.textContent = icon;
+  document.getElementById('status-text').textContent = msg;
+  if (elapsed != null) {
+    document.getElementById('status-time').textContent = `${Number(elapsed).toFixed(1)}s`;
+  } else if (state !== 'running') {
+    // Don't clear time on running (timer updates it)
+  }
+}
+
+function startTimer() {
+  _timerStart = Date.now();
+  _timerInterval = setInterval(() => {
+    const s = ((Date.now() - _timerStart) / 1000).toFixed(1);
+    document.getElementById('status-time').textContent = `${s}s`;
+  }, 200);
+}
+
+function stopTimer() {
+  clearInterval(_timerInterval);
+  _timerInterval = null;
+}
+
+// ─── Copy helpers ─────────────────────────────────────────────────────────────
+function copySQL() {
+  navigator.clipboard.writeText(_currentSQL).then(() => toast('SQL copied'));
+}
+function copyRaw() {
+  const raw = document.getElementById('raw-pre').textContent;
+  navigator.clipboard.writeText(raw).then(() => toast('Raw output copied'));
+}
+
+// ─── Enter key submit ─────────────────────────────────────────────────────────
+document.getElementById('query-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) generate();
+});
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
+async function api(path, body) {
+  const opts = body
+    ? { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }
+    : { method: 'GET' };
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`HTTP ${res.status}: ${t.slice(0,120)}`);
+  }
+  return res.json();
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+let _toastTimer;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.classList.remove('show'), 2000);
+}
+</script>
+</body>
+</html>

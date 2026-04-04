@@ -644,7 +644,7 @@ class QueryPipeline:
             result = await self.execute(
                 user_query=query_for_nlsql,
                 row_limit=row_limit,
-                timeout=45.0,
+                timeout=90.0,  # Increased from 45s — Groq LLM generation can take 60-90s for complex multi-join queries
                 intent_state=accumulated,  # v6.1.1: Pass intent state for FK preferences
                 route_filters=route_filters,  # v6.12: Structured route constraints
             )
