@@ -2800,7 +2800,7 @@ def _inject_relationally_aware(
         )
         return None
 
-    join_path = schema_graph.find_join_path(source_sg_key, dest_sg_key)
+    join_path = schema_graph.find_join_path(source_sg_key, dest_sg_key, max_depth=4)
 
     if not join_path:
         logger.warning(

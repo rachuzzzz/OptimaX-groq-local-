@@ -10,6 +10,7 @@ Orchestrates a single user query through:
 Contains NO decision logic. The accumulator is the sole clarification authority.
 """
 
+import re
 import logging
 from datetime import datetime
 from typing import Dict, Any, Optional, List
@@ -289,11 +290,14 @@ class QueryPipeline:
                     accumulated.clear_cost_guard()
                     session["accumulated_intent"] = accumulated
 
-                    # Execute directly — no LLM, no NL-SQL
+                    # Execute directly — no LLM, no NL-SQL.
+                    # Use 90s timeout (matches NL path) — cost-guard queries are
+                    # already known to be heavy; giving them less time than the
+                    # original NL call is backwards.
                     result = await self.execute_sql(
                         sql=rewritten_sql,
                         row_limit=parsed_limit,
-                        timeout=45.0,
+                        timeout=90.0,
                     )
 
                     disclosure = disclose_for_cost_limit_rewrite(
@@ -334,6 +338,33 @@ class QueryPipeline:
                     f"[PIPELINE] Extracted: entity={extraction.intent.entity_type}, "
                     f"metric={extraction.intent.metric}"
                 )
+
+                # =============================================================
+                # RANKING OVERRIDE — post-extraction "top N" / "bottom N" fix
+                # =============================================================
+                # The LLM extractor reads "List top 3 passengers..." and returns
+                # metric=list because "List" is the surface verb.  It misses the
+                # ranking intent of "top 3".  This regex pass corrects that:
+                # if the raw query contains a "top/bottom N" pattern AND the
+                # extracted metric is list/unknown, override to top_n / bottom_n
+                # and set n so has_metric() returns True without clarification.
+                # =============================================================
+                _top_m  = re.search(r'\b(?:top|best|first)\s+(\d+)\b',    query, re.IGNORECASE)
+                _bot_m  = re.search(r'\b(?:bottom|worst|lowest)\s+(\d+)\b', query, re.IGNORECASE)
+                _metric = (extraction.intent.metric or "").lower()
+                if _metric in ("list", "unknown", "") and (_top_m or _bot_m):
+                    if _top_m:
+                        extraction.intent.metric  = "top_n"
+                        extraction.intent.ranking = "top_n"
+                        extraction.intent.n       = int(_top_m.group(1))
+                    else:
+                        extraction.intent.metric  = "bottom_n"
+                        extraction.intent.ranking = "bottom_n"
+                        extraction.intent.n       = int(_bot_m.group(1))
+                    logger.info(
+                        f"[PIPELINE] Ranking override: metric={extraction.intent.metric}, "
+                        f"n={extraction.intent.n} (detected in query)"
+                    )
 
                 # =============================================================
                 # ALSR PHASE 1 — entity_type composite phrase decomposition (v6.22)
@@ -470,6 +501,49 @@ class QueryPipeline:
                     pass  # ALSR not available; Phase 1 guard already logged this
 
                 # =============================================================
+                # ATR PHASE 4 — Aggregation target resolution (v6.25)
+                # =============================================================
+                # Resolves the target column for bare aggregation metrics
+                # (avg/sum/min/max/total). Example: "average passenger age"
+                # → metric_target = "passenger.age" → has_metric() COMPLETE.
+                #
+                # Applied post-merge (below) so merge's optional clear() cannot
+                # wipe it. evaluate() is called AFTER the post-merge block, so
+                # metric_target will be visible at the sole decision point.
+                #
+                # Guard: only fires when metric ∈ AGGREGATION_METRICS AND
+                # entity_type is resolved. COUNT and domain metrics are skipped.
+                # =============================================================
+                _atr_result = None
+                try:
+                    from aggregation_target_resolver import (
+                        resolve_aggregation_target,
+                        AGGREGATION_METRICS as _ATR_METRICS,
+                    )
+                    from intent_accumulator import get_schema_reference as _get_schema_atr
+                    _atr_metric = (extraction.intent.metric or "").lower()
+                    _atr_entity = extraction.intent.entity_type
+                    _atr_schema = _get_schema_atr()
+                    if (
+                        _atr_metric in _ATR_METRICS
+                        and _atr_entity
+                        and _atr_entity not in ("unknown", "")
+                        and _atr_schema
+                    ):
+                        _atr_result = resolve_aggregation_target(
+                            query, _atr_metric, _atr_entity, _atr_schema
+                        )
+                        if _atr_result:
+                            logger.info(
+                                f"[PIPELINE] ATR Phase 4: '{_atr_metric}' target → "
+                                f"{_atr_result.qualified} (entity='{_atr_entity}')"
+                            )
+                except ImportError:
+                    logger.debug("[PIPELINE] ATR not available (aggregation_target_resolver not installed)")
+                except Exception as _atr_err:
+                    logger.debug(f"[PIPELINE] ATR error: {_atr_err}")
+
+                # =============================================================
                 # ALSR PHASE 3 — tail-position grouping phrase (v6.22+)
                 # =============================================================
                 # Detect structural grouping patterns (per / grouped by /
@@ -553,6 +627,9 @@ class QueryPipeline:
                         accumulated.attribute_bindings.append(_alsr_grouping_binding)
                         accumulated.group_by_targets.append(_alsr_grouping_binding.qualified)
                         _alsr_any = True
+                    if _atr_result:
+                        accumulated.metric_target = _atr_result.qualified
+                        _alsr_any = True
                     if _alsr_any:
                         session["accumulated_intent"] = accumulated
 
@@ -612,6 +689,16 @@ class QueryPipeline:
                     )
                 except ImportError:
                     pass  # ALSR not available; already logged in Phase 1
+
+            # ATR metric_target hint injection (v6.25)
+            if accumulated and getattr(accumulated, 'metric_target', None):
+                query_for_nlsql = (
+                    f"{query_for_nlsql} "
+                    f"[Aggregation target: metric_target = {accumulated.metric_target}]"
+                )
+                logger.info(
+                    f"[PIPELINE] ATR hint injected: metric_target={accumulated.metric_target}"
+                )
 
             # =================================================================
             # SEMANTIC CONTEXT BINDING (v6.12 - Structured Constraint Injection)

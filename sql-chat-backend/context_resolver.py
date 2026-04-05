@@ -849,19 +849,12 @@ def apply_semantic_context_binding(
         return (query, None, None)  # Query already has route, no binding needed
 
     # Step 2: LIFECYCLE — check if query references prior route context
-    # If no route reference, the stored route is stale → clear it.
-    # This prevents route filters from leaking into unrelated queries.
-    # e.g., "count bookings" after "flights from JFK to ATL" must NOT inherit
-    # the JFK→ATL route filters.
+    # Route is retained until a NEW explicit route is provided or the session ends.
+    # We do NOT clear on non-route queries — this allows "this route" references
+    # to work across cost guard interactions and multi-turn conversations.
     has_route_ref = _module_route_detector.has_route_reference(query)
 
     if not has_route_ref:
-        if session_context is not None and session_context.has_route():
-            logger.info(
-                "[CONTEXT_BINDING] No route reference in query — "
-                "clearing stale route context"
-            )
-            session_context.clear_route()
         return (query, None, None)
 
     # Step 3: GUARD — session must have a stored route to resolve reference

@@ -460,8 +460,8 @@ class CanonicalAliasInjector:
             ON booking_leg.flight_id = flight.flight_id
             → ON bl.flight_id = f.flight_id
 
-        Negative lookbehind `(?<!\.)` prevents rewriting `schema.table.col`
-        (where `table` is preceded by a dot — part of a schema-qualified name).
+        Negative lookbehind ``(?<!\.)`` prevents rewriting ``schema.table.col``
+        (where ``table`` is preceded by a dot — part of a schema-qualified name).
         """
         result = sql
 
@@ -544,7 +544,11 @@ class CanonicalAliasInjector:
         # Apply qualification to non-ON clauses, one column at a time.
         for col, col_alias in col_to_alias.items():
             pattern = re.compile(
-                r'(?<!\.)\b' + re.escape(col) + r'\b(?!\s*\.)',
+                # (?<!as ) — skip identifiers that are column output aliases
+                # (i.e. the word immediately after AS in SELECT).  Whitespace is
+                # already collapsed to a single space by normalize(), so "as "
+                # is always exactly 3 chars — safe as a fixed-width lookbehind.
+                r'(?<!as )(?<!\.)\b' + re.escape(col) + r'\b(?!\s*\.)',
                 re.IGNORECASE,
             )
             replacement = f"{col_alias}.{col}"

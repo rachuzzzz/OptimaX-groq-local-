@@ -616,16 +616,13 @@ class SchemaGraph:
 
         while pq:
             neg_score, hop_count, current_table, path, visited_tables = heapq.heappop(pq)
-            current_score = -neg_score  # Convert back to positive
+            current_score = -neg_score
 
-            # Depth safety net — unreachable in practice when effective_depth
-            # = len(tables) because the visited set prevents revisiting nodes,
-            # bounding path length to len(tables)-1.  Fires only if an explicit
-            # max_depth is passed that is smaller than the natural path length.
+            # Depth safety net
             if hop_count >= effective_depth:
                 continue
 
-            # If we've already found a better path to this table, skip
+            # Prune: already found a better cumulative score to this table
             if current_table in best_scores and current_score < best_scores[current_table]:
                 continue
 
@@ -649,23 +646,17 @@ class SchemaGraph:
                     ))
                     continue
 
-                # Calculate new path score
                 new_score = current_score + edge_score
                 new_hop_count = hop_count + 1
-
-                # Build new path with updated visited set
                 new_path = path + [(current_table, join_col, next_table, related_col)]
-                new_visited = visited_tables | {next_table}  # Add next_table to visited set
+                new_visited = visited_tables | {next_table}
 
-                # Found target?
+                # Found target — record and don't push further
                 if next_table == target_table:
                     all_paths_to_target.append((new_score, new_hop_count, new_path))
-
-                    # Continue exploring to find ALL paths within max_depth
-                    # (we'll select best one at the end)
                     continue
 
-                # Only explore if this is a better path to next_table
+                # Only push if this is a strictly better cumulative score
                 if next_table not in best_scores or new_score > best_scores[next_table]:
                     best_scores[next_table] = new_score
                     heapq.heappush(pq, (-new_score, new_hop_count, next_table, new_path, new_visited))
@@ -688,10 +679,13 @@ class SchemaGraph:
             return None
 
         # Sort by:
-        # 1. Primary: Highest cumulative score
-        # 2. Secondary: Fewest hops (when scores are close)
-        # This implements cost-aware optimization
-        all_paths_to_target.sort(reverse=True, key=lambda x: (x[0], -x[1]))
+        # 1. Primary: Highest score-per-hop (efficiency) — prevents long FK
+        #    chains from beating shorter ones purely by accumulating weight.
+        #    e.g. booking→booking_leg→flight (2 hops, 600 total, 300/hop) beats
+        #    booking→account→...→flight (7 hops, 2100 total, 300/hop) because
+        #    both score 300/hop, then tiebreaker fires.
+        # 2. Secondary: Fewest hops (when efficiency ties, shorter path wins)
+        all_paths_to_target.sort(reverse=True, key=lambda x: (x[0] / max(x[1], 1), -x[1]))
         best_score, best_hop_count, best_path = all_paths_to_target[0]
 
         # ✅ DJPI v3 FIX #4: Enhanced debug logging

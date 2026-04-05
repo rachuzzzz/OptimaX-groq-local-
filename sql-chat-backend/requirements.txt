@@ -13,7 +13,7 @@ fastapi==0.104.1
 # Uvicorn: ASGI server that runs FastAPI with async support
 uvicorn==0.24.0
 # Pydantic: Data validation and serialization for request/response models
-pydantic==2.8.0
+pydantic==2.12.5
 
 # -----------------------------------------------------------------------------
 # LlamaIndex NL-SQL Stack (Groq-Only)
@@ -41,15 +41,15 @@ llama-index-instrumentation==0.4.2
 # Database Layer
 # -----------------------------------------------------------------------------
 # SQLAlchemy: ORM and SQL toolkit, used by LlamaIndex's SQLDatabase
-sqlalchemy==2.0.23
+sqlalchemy==2.0.49
 # psycopg2-binary: PostgreSQL adapter (binary wheels for easy install)
-psycopg2-binary==2.9.9
+psycopg2-binary==2.9.11
 
 # -----------------------------------------------------------------------------
 # Data Processing
 # -----------------------------------------------------------------------------
 # Pandas: DataFrame operations for query result processing
-pandas==2.1.4
+pandas==3.0.2
 
 # -----------------------------------------------------------------------------
 # Utilities
@@ -61,7 +61,7 @@ sqlparse==0.4.4
 # requests: HTTP client for external API calls
 requests==2.31.0
 # aiohttp: Async HTTP client for non-blocking requests
-aiohttp==3.9.1
+aiohttp==3.13.5
 
 # -----------------------------------------------------------------------------
 # Development (Optional)

@@ -133,6 +133,34 @@ from sqlalchemy import create_engine
 # Disable embeddings (we use NL-SQL, not RAG)
 Settings.embed_model = None
 
+
+class GuardedSQLDatabase(SQLDatabase):
+    """SQLDatabase subclass that bounds LlamaIndex's internal SQL execution.
+
+    NLSQLTableQueryEngine.query() generates SQL and then executes it via
+    run_sql() before returning — entirely outside our pipeline's LIMIT
+    enforcement and cost guard.  For large unbound queries (e.g. 4-table
+    JOIN with no LIMIT) this execution times out the whole request.
+
+    This subclass intercepts run_sql() and injects LIMIT 50 on every
+    SELECT so LlamaIndex's internal execution is always bounded.  Our
+    pipeline then extracts the *original* SQL from nl_response.metadata
+    ['sql_query'] and re-executes it through the full guarded path
+    (cost guard, canonical LIMIT enforcement, execute_query).
+    """
+    _INTERNAL_ROW_LIMIT: int = 50
+
+    def run_sql(self, command: str):  # type: ignore[override]
+        try:
+            from sql_validator import enforce_query_bounds
+            bounded = enforce_query_bounds(command, row_limit=self._INTERNAL_ROW_LIMIT)
+            safe_command = bounded.sql
+        except Exception:
+            # If LIMIT injection fails for any reason, fall through to
+            # unguarded execution rather than silently dropping the query.
+            safe_command = command
+        return super().run_sql(safe_command)
+
 # =============================================================================
 # LLM PROVIDER GUARDRAIL: Block OpenAI drift at import time
 # =============================================================================
@@ -465,8 +493,10 @@ async def lifespan(app: FastAPI):
                    (f" in schema '{detected_schema}'" if detected_schema else ""))
         logger.info(f"  Tables: {raw_table_names[:5]}{'...' if len(raw_table_names) > 5 else ''}")
 
-        # SQLDatabase: schema passed separately from table names
-        sql_database = SQLDatabase(
+        # SQLDatabase: schema passed separately from table names.
+        # GuardedSQLDatabase injects LIMIT 50 on every internal run_sql()
+        # call so LlamaIndex's execution never runs an unbounded query.
+        sql_database = GuardedSQLDatabase(
             engine,
             schema=detected_schema,         # Schema passed separately (or None)
             include_tables=raw_table_names  # Raw table names only (no schema prefix)

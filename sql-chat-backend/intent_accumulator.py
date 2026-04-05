@@ -150,6 +150,8 @@ SAFE_DEFAULTS = {
 INVALID_METRIC_TOKENS = {
     "list", "show", "get", "display", "fetch", "find", "retrieve",
     "give", "tell", "select", "return", "view", "see", "lookup",
+    # Vague analytical nouns — semantically incomplete without a real metric
+    "performance", "statistics", "trends", "activity", "popular",
 }
 
 # =============================================================================
@@ -988,6 +990,13 @@ class IntentState:
     # The NL-SQL generator can use these as GROUP BY column hints.
     group_by_targets: List[str] = field(default_factory=list)
 
+    # ATR: Aggregation target column (v6.25)
+    # Qualified column reference resolved from bare aggregation metric phrase.
+    # e.g., "passenger.age" for "average passenger age".
+    # Satisfies has_metric() completeness for avg/sum/min/max/total without
+    # requiring the LLM extractor to also populate event or group_by_targets.
+    metric_target: Optional[str] = None
+
     # Clarification tracking (v6.23)
     # Records which field triggered the last clarification so IntentMerger can
     # distinguish an entity-clarification response ("passenger" answering
@@ -1039,6 +1048,7 @@ class IntentState:
                 for b in self.attribute_bindings
             ] if self.attribute_bindings else [],
             "group_by_targets": self.group_by_targets,
+            "metric_target": self.metric_target,          # v6.25
             "pending_clarification": self.pending_clarification,  # v6.23
         }
 
@@ -1099,6 +1109,7 @@ class IntentState:
             and self.event.lower() not in ("unknown", "none", "")
         )
         has_group_by = bool(getattr(self, "group_by_targets", None))
+        has_metric_target = bool(getattr(self, "metric_target", None))  # v6.25
 
         if self.ranking in ("top_n", "bottom_n"):
             # Ranking queries require an explicit grouping dimension.
@@ -1125,6 +1136,14 @@ class IntentState:
         if has_event:
             logger.debug(
                 f"[INTENT] '{metric_lower}' bound to event={self.event!r} - COMPLETE"
+            )
+            return True
+
+        # v6.25: ATR-resolved aggregation target column satisfies completeness.
+        # e.g., "average passenger age" → metric_target="passenger.age" → COMPLETE
+        if has_metric_target:
+            logger.debug(
+                f"[INTENT] '{metric_lower}' bound to metric_target={self.metric_target!r} - COMPLETE"
             )
             return True
 
@@ -1353,6 +1372,7 @@ class IntentState:
         self.pending_cost_guard = None  # v6.16: Reset cost guard state
         self.attribute_bindings = []   # v6.22: Reset ALSR attribute bindings
         self.group_by_targets = []     # v6.22: Reset ALSR group-by targets
+        self.metric_target = None      # v6.25: Reset ATR target
         self.pending_clarification = None  # v6.23: Reset clarification tracking
 
         # Preserve FK preferences unless explicitly clearing everything
@@ -1906,16 +1926,15 @@ def evaluate(accumulated: IntentState) -> IntentDecision:
         return IntentDecision(
             proceed=False,
             clarification=(
-                "Comparison queries require more specific criteria.\n\n"
-                "Please clarify:\n"
-                "- **What segments** are you comparing? (e.g., VIP vs regular)\n"
-                "- **What metric** should be compared? (e.g., booking count, revenue)\n"
-                "- **What time period**? (e.g., last month, last year)"
+                "**Why I'm asking:** Comparison queries (A vs B) are not directly "
+                "supported — they require segmentation logic that goes beyond a single "
+                "SQL query.\n\n"
+                "**Try rephrasing as a single focused query**, for example:"
             ),
             options=[
-                "Compare by booking count",
-                "Compare by revenue",
-                "Compare by flight count",
+                "Show booking count per frequent flyer level",
+                "Show total award points per frequent flyer level",
+                "Show flight count for frequent flyers",
             ],
             context=ClarificationContext(
                 reason=ClarificationReason.COMPARISON_QUERY,
@@ -2135,6 +2154,28 @@ def _make_clarification_with_context(
         entity = state.entity_type or "data"
         metric_val = state.metric
 
+        # =====================================================================
+        # Check whether the entity itself is schema-resolvable.
+        # has_entity() returns True for any non-null/non-"unknown" string, so
+        # "customers" passes even though it maps to no table. When unresolved,
+        # surface that in the message so the user knows why we keep asking.
+        # =====================================================================
+        entity_unresolved = False
+        entity_notice = ""
+        schema = get_schema_reference()
+        if schema and "tables" in schema and entity not in ("data", "unknown"):
+            bare_names = {k.split(".")[-1].lower() for k in schema["tables"].keys()}
+            if entity.lower() not in bare_names:
+                entity_unresolved = True
+                # Build a short list of real table names as suggestions
+                real_tables = sorted(bare_names - {"phone", "seat_reservation"})
+                entity_notice = (
+                    f"**Note:** I don't recognise '{entity}' as a known table "
+                    f"in this database.\n\n"
+                    f"Known tables: {', '.join(real_tables)}.\n\n"
+                    f"Please re-phrase using one of those, or clarify below.\n\n"
+                )
+
         # Determine the specific reason for metric clarification
         reason, explanation, detected = _classify_metric_ambiguity(state)
 
@@ -2144,14 +2185,12 @@ def _make_clarification_with_context(
             n = state.n or 10
 
             if reason == ClarificationReason.INVALID_METRIC_TOKEN:
-                # v6.5: Explain that the token is not a metric
                 q = (
                     f"**Why I'm asking:** '{metric_val}' describes an action, "
                     f"not how to measure '{entity}s'.\n\n"
                     f"What determines the {rank} {n} {entity}s?"
                 )
             elif reason == ClarificationReason.BARE_AGGREGATION:
-                # v6.5: Explain that the aggregation needs a target
                 q = (
                     f"**Why I'm asking:** '{metric_val}' is ambiguous — "
                     f"{metric_val} of what?\n\n"
@@ -2174,6 +2213,10 @@ def _make_clarification_with_context(
                     f"**Why I'm asking:** No metric was specified.\n\n"
                     f"What would you like to know about {entity}s?"
                 )
+
+        # Prepend entity-unresolved notice when relevant
+        if entity_notice:
+            q = entity_notice + q
 
         # Build context
         context = ClarificationContext(
@@ -2198,20 +2241,25 @@ def _make_clarification_with_context(
             return q, opts, context
 
         # =====================================================================
-        # Fallback: Generic context-aware options (when no schema available)
+        # Fallback: Generic context-aware options (when no schema available).
+        # Only include options that map to real schema columns.
         # =====================================================================
         logger.debug(f"[ACCUMULATOR] No schema suggestions for {entity} - using defaults")
 
         if "airport" in (entity or "").lower():
-            opts = ["By flight count", "By total passengers", "By departure count", "By arrival count"]
+            opts = ["By flight count", "By departure count", "By arrival count"]
         elif "flight" in (entity or "").lower():
-            opts = ["By passenger count", "By revenue", "By duration", "By distance"]
+            opts = ["By passenger count", "By departure airport", "By aircraft type"]
         elif "customer" in (entity or "").lower() or "passenger" in (entity or "").lower():
-            opts = ["By total booking value", "By booking count", "By miles flown", "By loyalty points"]
+            # Only schema-grounded options — no "miles flown" (no such column)
+            opts = ["By booking count", "By flight count", "By award points"]
         elif "route" in (entity or "").lower():
-            opts = ["By passenger count", "By flight frequency", "By revenue", "By distance"]
+            opts = ["By passenger count", "By flight count"]
+        elif entity_unresolved:
+            # Entity unknown — offer entity selection instead of metrics
+            opts = ["passenger", "booking", "flight", "airport", "frequent_flyer"]
         else:
-            opts = ["By count", "By total value", "By average", "List all"]
+            opts = ["By count", "By total value", "By average"]
 
         return q, opts, context
 

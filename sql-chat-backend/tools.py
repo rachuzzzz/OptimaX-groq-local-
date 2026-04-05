@@ -53,9 +53,13 @@ class DatabaseManager:
     # callers that pass safe_limit_threshold= continue to compile, but the
     # LIMIT-bypass logic that read these values has been removed.
     # =========================================================================
-    COST_THRESHOLD = 100000  # Max estimated rows before blocking
+    COST_THRESHOLD = 100000   # Max ROOT-NODE estimated rows before blocking
+    SCAN_THRESHOLD = 2000000  # Max inner-scan rows before blocking regardless
+                              # of output size.  Prevents expensive multi-table
+                              # joins (e.g. 12M-row 4-way join) from slipping
+                              # through when root node = LIMIT value (50).
     SAFE_LIMIT_THRESHOLD = 100  # DEPRECATED v6.22 — kept for API compat only
-    MAX_SAFE_JOIN_COUNT = 4  # DEPRECATED v6.22 — kept for API compat only
+    MAX_SAFE_JOIN_COUNT = 4     # DEPRECATED v6.22 — kept for API compat only
 
     def __init__(self, database_url: str):
         """Initialize database connection"""
@@ -453,10 +457,17 @@ class DatabaseManager:
                 safe_limit_threshold=self.SAFE_LIMIT_THRESHOLD
             )
             if not cost_check["safe"]:
-                logger.warning(
-                    f"[GUARD] Query blocked: estimated rows too high "
-                    f"({cost_check['estimated_rows']:,} > {effective_cost_threshold:,})"
-                )
+                blocked_by = cost_check.get("blocked_by", "output_rows")
+                if blocked_by == "scan_rows":
+                    logger.warning(
+                        f"[GUARD] Query blocked: inner scan too large "
+                        f"({cost_check['estimated_rows']:,} > {self.SCAN_THRESHOLD:,})"
+                    )
+                else:
+                    logger.warning(
+                        f"[GUARD] Query blocked: estimated rows too high "
+                        f"({cost_check['estimated_rows']:,} > {effective_cost_threshold:,})"
+                    )
                 return {
                     "success": False,
                     "error": (
@@ -608,6 +619,42 @@ class DatabaseManager:
                 "estimated_rows": 1 if classification.has_aggregates else 0,
                 "risk_class": classification.risk_class.value,
             }
+
+        # =====================================================================
+        # MULTI_TABLE_JOIN + small LIMIT bypass (no GROUP BY)
+        # =====================================================================
+        # For a plain join (no GROUP BY, no subquery) with a small LIMIT,
+        # PostgreSQL can use early-termination plans (nested loop + index scan,
+        # or hash join stopped after LIMIT rows are found). The full join
+        # cardinality is never materialised. LIMIT directly bounds the cost
+        # for this specific risk class.
+        #
+        # This is structurally different from MULTI_TABLE_GROUPED_AGGREGATE
+        # where the database MUST process every joined row to compute groups
+        # before LIMIT can be applied — the case the v6.22 classifier protects.
+        #
+        # Guard: risk class must be exactly MULTI_TABLE_JOIN (has_joins=True,
+        # has_group_by=False, is_complex=False). Any GROUP BY or subquery falls
+        # through to EXPLAIN as before.
+        # =====================================================================
+        if (
+            classification.risk_class == QueryRiskClass.MULTI_TABLE_JOIN
+            and not classification.has_group_by
+            and not classification.is_complex
+        ):
+            from sql_validator import extract_limit
+            query_limit = extract_limit(sql)
+            if query_limit is not None and query_limit <= safe_limit_threshold:
+                logger.info(
+                    f"[GUARD] MULTI_TABLE_JOIN + LIMIT {query_limit} ≤ "
+                    f"{safe_limit_threshold} — bounded output; skipping cost check"
+                )
+                return {
+                    "safe": True,
+                    "estimated_rows": query_limit,
+                    "risk_class": classification.risk_class.value,
+                }
+
         # All other risk classes fall through to EXPLAIN below.
 
         try:
@@ -628,19 +675,35 @@ class DatabaseManager:
                     logger.debug("[GUARD] EXPLAIN returned no rows - allowing execution")
                     return {"safe": True, "estimated_rows": 0}
 
-                # Parse EXPLAIN output to extract row estimate
-                # PostgreSQL format: "Seq Scan on table  (cost=... rows=NNN ...)"
-                # MySQL format: has 'rows' column
-                estimated_rows = 0
+                # Parse EXPLAIN output to extract row estimate.
+                #
+                # CRITICAL FIX: Use the ROOT NODE estimate (first rows= in the
+                # plan), NOT max() across all nodes.
+                #
+                # PostgreSQL EXPLAIN outputs the plan from root to leaves.
+                # The root node is always the first line and represents what
+                # the query actually returns:
+                #   - Limit node  → rows = LIMIT value (e.g. 50)
+                #   - Aggregate   → rows = distinct group count (e.g. 300)
+                #   - Seq Scan    → rows = full table rows
+                #
+                # max() was incorrect: for GROUP BY + LIMIT queries it picks
+                # up the inner scan rows (e.g. 284,658) and blocks queries
+                # that produce only 50 output rows and complete in <100ms.
+                #
+                # max_scan_rows is tracked separately for logging only.
+                root_rows: Optional[int] = None
+                max_scan_rows: int = 0
 
-                # Try to extract from PostgreSQL text format
                 for row in rows:
                     row_str = str(row)
                     # Look for "rows=NNNN" pattern
                     rows_match = re.search(r'rows=(\d+)', row_str)
                     if rows_match:
                         row_count = int(rows_match.group(1))
-                        estimated_rows = max(estimated_rows, row_count)
+                        max_scan_rows = max(max_scan_rows, row_count)
+                        if root_rows is None:
+                            root_rows = row_count  # First = root plan node
 
                     # Also check for MySQL format (column named 'rows')
                     if hasattr(row, '_mapping'):
@@ -648,17 +711,50 @@ class DatabaseManager:
                         if 'rows' in mapping and mapping['rows']:
                             try:
                                 row_count = int(mapping['rows'])
-                                estimated_rows = max(estimated_rows, row_count)
+                                max_scan_rows = max(max_scan_rows, row_count)
+                                if root_rows is None:
+                                    root_rows = row_count
                             except (ValueError, TypeError):
                                 pass
 
-                print(f"[GUARD] EXPLAIN estimated rows: {estimated_rows:,}", flush=True)
-                logger.info(f"[GUARD] EXPLAIN estimated rows: {estimated_rows:,}")
+                estimated_rows = root_rows if root_rows is not None else max_scan_rows
+
+                print(
+                    f"[GUARD] EXPLAIN estimated rows: {estimated_rows:,}"
+                    f" (root node; max inner scan: {max_scan_rows:,})",
+                    flush=True
+                )
+                logger.info(
+                    f"[GUARD] EXPLAIN estimated rows: {estimated_rows:,}"
+                    f" (root node; max inner scan: {max_scan_rows:,})"
+                )
+
+                # Dual-threshold check:
+                # 1. Root node (output rows) must be within COST_THRESHOLD.
+                # 2. Max inner scan must be within SCAN_THRESHOLD.
+                #
+                # Rationale: root node = LIMIT value for any LIMIT-N query,
+                # so check (1) alone lets through expensive 4-way joins when
+                # LIMIT 50 is present.  Check (2) catches those cases:
+                #   flight+airport (284K scan)  → allowed  (< 2M)
+                #   flight→bl→bp→passenger (12.5M) → blocked (> 2M)
+                scan_threshold = self.SCAN_THRESHOLD
 
                 if estimated_rows > threshold:
                     return {
                         "safe": False,
                         "estimated_rows": estimated_rows,
+                        "blocked_by": "output_rows",
+                    }
+
+                if max_scan_rows > scan_threshold:
+                    logger.warning(
+                        f"[GUARD] Inner scan too large: {max_scan_rows:,} > {scan_threshold:,}"
+                    )
+                    return {
+                        "safe": False,
+                        "estimated_rows": max_scan_rows,
+                        "blocked_by": "scan_rows",
                     }
 
                 return {
